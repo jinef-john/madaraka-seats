@@ -91,3 +91,28 @@ export interface SearchResponse extends RoutesResponse {
   query: SearchQuery;
   results: TrainSearchResult[];
 }
+
+export interface MonthDayTrain {
+  trainNo: string;
+  /** Departure time in HH:MM format */
+  departure: string;
+  /** Open economy seats. For inter_county, holds total available seats. */
+  economy: number;
+  /** Open first class seats. 0 for inter_county. */
+  firstClass: number;
+}
+
+export interface MonthDay {
+  /** YYYY-MM-DD */
+  date: string;
+  trains: MonthDayTrain[];
+}
+
+export interface MonthResponse {
+  scheduleType: TrainType;
+  from: string;
+  to: string;
+  year: number;
+  month: number;
+  days: MonthDay[];
+}

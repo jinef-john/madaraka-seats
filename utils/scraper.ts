@@ -1,6 +1,8 @@
 import { Session } from "httpcloak";
 
 import type {
+  MonthDay,
+  MonthDayTrain,
   PremiumSeatGroup,
   PremiumTrainResult,
   SelectOption,
@@ -572,3 +574,237 @@ export async function scrapeSearch(
     session.close();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Month scraper
+// ---------------------------------------------------------------------------
+
+function extractTime(datetime: string): string {
+  const match = datetime.match(/\d{2}:\d{2}/);
+  return match ? match[0] : datetime;
+}
+
+function toMonthDayTrain(result: TrainSearchResult): MonthDayTrain {
+  if (result.resultType === "standard") {
+    return {
+      trainNo: result.trainNo,
+      departure: extractTime(result.departure),
+      economy: parseInt(result.openSeats.economy, 10) || 0,
+      firstClass: parseInt(result.openSeats.firstClass, 10) || 0,
+    };
+  }
+  // inter_county: sum available seats across all coaches
+  const total = result.seatGroups.reduce((sum, g) => {
+    if (g.decodeError) return sum;
+    const n =
+      typeof g.availableSeats === "number"
+        ? g.availableSeats
+        : parseInt(String(g.availableSeats ?? "0"), 10) || 0;
+    return sum + n;
+  }, 0);
+  return {
+    trainNo: result.trainNo,
+    departure: extractTime(result.departure),
+    economy: total,
+    firstClass: 0,
+  };
+}
+
+// Scrape a single day using an already-established session and CSRF token.
+// Departure queries run sequentially within the session to stay friendly to
+// PHP's per-session file lock (concurrent requests sharing the same
+// PHPSESSID are serialised server-side anyway).
+async function scrapeDayWithSession(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    date: string;
+    departuresToQuery: SelectOption[];
+  },
+): Promise<MonthDay> {
+  const dayResults: TrainSearchResult[] = [];
+
+  for (const option of config.departuresToQuery) {
+    try {
+      const response = await submitSearch(session, csrfToken, {
+        schedule: config.schedule,
+        fromId: config.fromId,
+        toId: config.toId,
+        date: config.date,
+        departure: option.value,
+      });
+
+      const parsed =
+        config.schedule === "inter_county"
+          ? parsePremiumResults(response.text)
+          : parseStandardResults(response.text);
+
+      for (const result of parsed) {
+        dayResults.push({
+          ...result,
+          queriedDeparture: option.value || "<blank>",
+          queriedDepartureLabel: option.label || option.value || "<blank>",
+          statusCode: response.statusCode,
+          protocol: response.protocol,
+        } as TrainSearchResult);
+      }
+    } catch {
+      // A single departure-slot failure should not kill the whole day.
+    }
+  }
+
+  const trains = uniqueBy(
+    dayResults,
+    (r) => `${r.trainId}|${r.trainNo}|${r.departure}`,
+  ).map(toMonthDayTrain);
+
+  return { date: config.date, trains };
+}
+
+// How many parallel PHP sessions to open for a month scrape.
+// Each session gets its own PHPSESSID so PHP does not serialise requests
+// across workers via its session file lock. Benchmarks show diminishing
+// returns beyond 14 independent sessions; 14 workers × ceil(31/14)=3 days
+// each brings a 31-day month down to ~10-12 s.
+// NOTE: do NOT use httpcloak fork() here — fork() shares the cookie jar, so
+// all forked tabs end up with the same PHPSESSID and PHP serialises them.
+const MONTH_CONCURRENCY = 14;
+
+/**
+ * Scrape a full month using multiple parallel sessions.
+ *
+ * `onDay` is called once per day as each result arrives (potentially out of
+ * calendar order since workers race). Callers that need sorted output should
+ * sort after all calls have settled (see `scrapeMonth`).
+ */
+export async function scrapeMonthStreaming(
+  schedule: Schedule,
+  from: string,
+  to: string,
+  year: number,
+  month: number,
+  onDay: (day: MonthDay) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  // Phase 1: one setup session to resolve terminal / destination IDs and the
+  // list of departure slots. Single CSRF request — cheap.
+  let fromId: string;
+  let toId: string;
+  let departuresToQuery: SelectOption[];
+
+  {
+    const setup = createSession();
+    try {
+      await setup.warmup(METICKETS_BASE_URL);
+      const home = await loadHome(setup);
+      const { basePath, terminals } = await loadTerminals(setup, schedule);
+
+      const departures = extractNamedSelectOptions(
+        home.html,
+        schedule === "inter_county"
+          ? "premium_depature_time"
+          : "depature_time",
+      );
+
+      const fromOption = findOption(terminals, from);
+      if (!fromOption) {
+        throw new Error(`Departure terminal '${from}' was not found.`);
+      }
+
+      const destinations = await loadDestinations(
+        setup,
+        basePath,
+        schedule,
+        fromOption.value,
+      );
+
+      const toOption = findOption(destinations, to);
+      if (!toOption) {
+        throw new Error(
+          `Destination '${to}' was not found for ${fromOption.label}.`,
+        );
+      }
+
+      fromId = fromOption.value;
+      toId = toOption.value;
+      departuresToQuery =
+        departures.length > 0
+          ? departures
+          : [{ value: "", label: "<blank>" }];
+    } finally {
+      setup.close();
+    }
+  }
+
+  // Phase 2: distribute dates across MONTH_CONCURRENCY worker sessions.
+  // Each worker opens its OWN homepage → own PHPSESSID → no session lock
+  // contention. Within each worker, days are processed sequentially.
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const dates = Array.from({ length: daysInMonth }, (_, i) => {
+    const d = i + 1;
+    return `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  }).filter((date) => date >= todayStr);
+
+  const chunkSize = Math.ceil(dates.length / MONTH_CONCURRENCY);
+  const chunks: string[][] = [];
+  for (let i = 0; i < dates.length; i += chunkSize) {
+    chunks.push(dates.slice(i, i + chunkSize));
+  }
+
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      const worker = createSession();
+      try {
+        const { csrfToken } = await loadHome(worker);
+
+        for (const date of chunk) {
+          if (signal?.aborted) break;
+
+          try {
+            const day = await scrapeDayWithSession(worker, csrfToken, {
+              schedule,
+              fromId,
+              toId,
+              date,
+              departuresToQuery,
+            });
+            onDay(day);
+          } catch {
+            // Emit an empty day rather than aborting the whole stream.
+            onDay({ date, trains: [] });
+          }
+          // Simulate browser page refresh: closes TCP/QUIC connections but
+          // keeps TLS session cache so the next day's requests look like a
+          // returning visitor (0-RTT resumption).
+          worker.refresh();
+        }
+      } finally {
+        worker.close();
+      }
+    }),
+  );
+}
+
+/**
+ * Blocking version — collects all days and returns them sorted.
+ * Used by the cached `/api/trains/month` route handler.
+ */
+export async function scrapeMonth(
+  schedule: Schedule,
+  from: string,
+  to: string,
+  year: number,
+  month: number,
+): Promise<MonthDay[]> {
+  const days: MonthDay[] = [];
+  await scrapeMonthStreaming(schedule, from, to, year, month, (day) =>
+    days.push(day),
+  );
+  return days.sort((a, b) => a.date.localeCompare(b.date));
+}
+
