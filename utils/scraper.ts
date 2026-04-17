@@ -335,12 +335,14 @@ function uniqueBy<T>(items: T[], keyFn: (item: T) => string): T[] {
 // ---------------------------------------------------------------------------
 
 function createSession(): Session {
+  const timeout = parseInt(process.env.SCRAPER_TIMEOUT ?? "30", 10);
+  const retry = parseInt(process.env.SCRAPER_RETRY ?? "2", 10);
   const session = new Session({
     preset: "chrome-latest",
-    timeout: 30,
+    timeout,
     httpVersion: "auto",
     allowRedirects: true,
-    retry: 2,
+    retry,
   });
   session.headers["Accept-Language"] = "en-US,en;q=0.9";
   return session;
@@ -666,12 +668,11 @@ async function scrapeDayWithSession(
 
 // How many parallel PHP sessions to open for a month scrape.
 // Each session gets its own PHPSESSID so PHP does not serialise requests
-// across workers via its session file lock. Benchmarks show diminishing
-// returns beyond 14 independent sessions; 14 workers × ceil(31/14)=3 days
-// each brings a 31-day month down to ~10-12 s.
+// across workers via its session file lock.
 // NOTE: do NOT use httpcloak fork() here — fork() shares the cookie jar, so
 // all forked tabs end up with the same PHPSESSID and PHP serialises them.
-const MONTH_CONCURRENCY = 14;
+// Configurable via SCRAPER_CONCURRENCY in .env.local.
+const MONTH_CONCURRENCY = parseInt(process.env.SCRAPER_CONCURRENCY ?? "20", 10);
 
 /**
  * Scrape a full month using multiple parallel sessions.
@@ -698,7 +699,6 @@ export async function scrapeMonthStreaming(
   {
     const setup = createSession();
     try {
-      await setup.warmup(METICKETS_BASE_URL);
       const home = await loadHome(setup);
       const { basePath, terminals } = await loadTerminals(setup, schedule);
 
