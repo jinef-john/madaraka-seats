@@ -2,9 +2,7 @@ import type { NextRequest } from "next/server";
 
 import type { TrainType } from "@/types/train";
 import { searchMetickets } from "@/utils/metickets";
-
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { getSearch, setSearch } from "@/utils/search-cache";
 
 function isTrainType(value: string | null): value is TrainType {
   return value === "express" || value === "inter_county" || value === "phase2";
@@ -56,6 +54,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const cacheKey = `${scheduleType}|${from}|${to}|${date}|${departure ?? ""}`;
+    const cached = getSearch(cacheKey);
+    if (cached) {
+      return Response.json(cached, {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
     const data = await searchMetickets({
       scheduleType,
       from,
@@ -65,6 +71,7 @@ export async function GET(request: NextRequest) {
       allTrains,
     });
 
+    setSearch(cacheKey, data);
     return Response.json(data, {
       headers: {
         "Cache-Control": "no-store",

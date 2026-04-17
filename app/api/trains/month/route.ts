@@ -1,27 +1,8 @@
-import { unstable_cache } from "next/cache";
 import type { NextRequest } from "next/server";
 
 import type { TrainType } from "@/types/train";
-import { scrapeMonth } from "@/utils/scraper";
+import { getCachedMonth } from "@/utils/cached-month";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-// Stale-while-revalidate: users always get the cached result instantly;
-// a fresh scrape runs in the background at most once every 5 minutes.
-// The month view doesn't need 30-second precision — 5-minute granularity
-// is fine for seat availability trends, and keeps the scrape cost low.
-const getCachedMonth = unstable_cache(
-  (
-    scheduleType: TrainType,
-    from: string,
-    to: string,
-    year: number,
-    month: number,
-  ) => scrapeMonth(scheduleType, from, to, year, month),
-  ["trains-month"],
-  { revalidate: 300 },
-);
 
 function isTrainType(v: string | null): v is TrainType {
   return v === "express" || v === "inter_county" || v === "phase2";

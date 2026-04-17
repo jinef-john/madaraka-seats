@@ -2,6 +2,14 @@ import type { TrainType, TrainTypeConfig } from "@/types/train";
 
 export const METICKETS_BASE_URL = "https://metickets.krc.co.ke";
 
+// Every station on a given line can be an origin; `allPairs` builds the
+// knownDestinationsByOrigin map automatically from the station list.
+function allPairs(stations: string[]): Record<string, string[]> {
+  return Object.fromEntries(
+    stations.map((s) => [s, stations.filter((d) => d !== s)]),
+  );
+}
+
 export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
   express: {
     type: "express",
@@ -11,10 +19,13 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
     reviewEndpoint: "/review-and-pay.php",
     defaultOrigin: "Nairobi Terminus",
     defaultDestination: "Mombasa Terminus",
+    // Linear route: Nairobi ↔ Voi ↔ Mombasa
     stationCatalog: ["Nairobi Terminus", "Mombasa Terminus", "Voi"],
-    knownDestinationsByOrigin: {
-      "Nairobi Terminus": ["Mombasa Terminus", "Voi"],
-    },
+    knownDestinationsByOrigin: allPairs([
+      "Nairobi Terminus",
+      "Mombasa Terminus",
+      "Voi",
+    ]),
     departureOptions: [
       { value: "3.00", label: "3.00 pm" },
       { value: "10.00", label: "10.00 pm" },
@@ -27,10 +38,10 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
     bookingEndpoint: "/booking-details-premium.php",
     reviewEndpoint: "/review-and-pay-premium.php",
     defaultOrigin: "Nairobi Terminus",
-    defaultDestination: "Emali",
+    defaultDestination: "Mombasa Terminus",
+    // Linear corridor: Nairobi → … → Mombasa
     stationCatalog: [
       "Nairobi Terminus",
-      "Mombasa Terminus",
       "Athi River",
       "Emali",
       "Kibwezi",
@@ -38,18 +49,19 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
       "Voi",
       "Miasenyi",
       "Mariakani",
+      "Mombasa Terminus",
     ],
-    knownDestinationsByOrigin: {
-      "Nairobi Terminus": [
-        "Mombasa Terminus",
-        "Emali",
-        "Kibwezi",
-        "Mtito Andei",
-        "Voi",
-        "Miasenyi",
-        "Mariakani",
-      ],
-    },
+    knownDestinationsByOrigin: allPairs([
+      "Nairobi Terminus",
+      "Athi River",
+      "Emali",
+      "Kibwezi",
+      "Mtito Andei",
+      "Voi",
+      "Miasenyi",
+      "Mariakani",
+      "Mombasa Terminus",
+    ]),
     departureOptions: [
       { value: "3:00 PM", label: "3.00 pm" },
       { value: "10:00 PM", label: "10.00 pm" },
@@ -63,6 +75,7 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
     reviewEndpoint: "/review-and-pay.php",
     defaultOrigin: "Nairobi Terminus",
     defaultDestination: "Suswa",
+    // Suburban corridor: Nairobi → Ongata Rongai → Ngong → Maai Mahiu → Suswa
     stationCatalog: [
       "Nairobi Terminus",
       "Ongata Rongai",
@@ -70,9 +83,13 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
       "Maai Mahiu",
       "Suswa",
     ],
-    knownDestinationsByOrigin: {
-      "Nairobi Terminus": ["Ongata Rongai", "Ngong", "Maai Mahiu", "Suswa"],
-    },
+    knownDestinationsByOrigin: allPairs([
+      "Nairobi Terminus",
+      "Ongata Rongai",
+      "Ngong",
+      "Maai Mahiu",
+      "Suswa",
+    ]),
     departureOptions: [],
   },
 };

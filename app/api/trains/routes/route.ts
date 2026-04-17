@@ -3,8 +3,6 @@ import type { NextRequest } from "next/server";
 import { getMeticketsRoutes } from "@/utils/metickets";
 import type { TrainType } from "@/types/train";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
 function isTrainType(value: string | null): value is TrainType {
   return value === "express" || value === "inter_county" || value === "phase2";
