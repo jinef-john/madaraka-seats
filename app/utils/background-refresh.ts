@@ -1,14 +1,23 @@
 import { TRAIN_TYPE_CONFIG } from "@/utils/train-config";
 import { scrapeMonth } from "@/utils/scraper";
-import { setMonth, allCachedRoutes } from "@/utils/month-cache";
+import { setMonth } from "@/utils/month-cache";
 import type { TrainType } from "@/types/train";
 
-function upcomingMonths(): { year: number; month: number }[] {
-  const now = new Date();
-  return [0, 1, 2].map((i) => {
-    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-    return { year: d.getFullYear(), month: d.getMonth() + 1 };
-  });
+const BATCH_SIZE = 3;
+
+async function warmOne(r: {
+  scheduleType: TrainType;
+  from: string;
+  to: string;
+  year: number;
+  month: number;
+}) {
+  try {
+    const days = await scrapeMonth(r.scheduleType, r.from, r.to, r.year, r.month);
+    await setMonth(r.scheduleType, r.from, r.to, r.year, r.month, days);
+  } catch {
+    // retain previous data on error
+  }
 }
 
 async function warmRoutes(
@@ -20,25 +29,18 @@ async function warmRoutes(
     month: number;
   }[],
 ) {
-  for (const r of routes) {
-    try {
-      const days = await scrapeMonth(
-        r.scheduleType,
-        r.from,
-        r.to,
-        r.year,
-        r.month,
-      );
-      await setMonth(r.scheduleType, r.from, r.to, r.year, r.month, days);
-    } catch {
-      // retain previous data on error
-    }
+  for (let i = 0; i < routes.length; i += BATCH_SIZE) {
+    const batch = routes.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(warmOne));
   }
 }
 
 export async function refresh() {
-  const months = upcomingMonths();
+  const now = new Date();
+  const currentMonth = { year: now.getFullYear(), month: now.getMonth() + 1 };
 
+  // Only refresh default routes for the current month (6 routes).
+  // Future months and non-default routes are cached on-demand when users request them.
   const primary: {
     scheduleType: TrainType;
     from: string;
@@ -51,23 +53,8 @@ export async function refresh() {
       [cfg.defaultOrigin, cfg.defaultDestination],
       [cfg.defaultDestination, cfg.defaultOrigin],
     ]) {
-      for (const m of months) {
-        primary.push({ scheduleType: cfg.type, from, to, ...m });
-      }
+      primary.push({ scheduleType: cfg.type, from, to, ...currentMonth });
     }
   }
   await warmRoutes(primary);
-
-  const primarySet = new Set(
-    primary.map(
-      (r) => `${r.scheduleType}|${r.from}|${r.to}|${r.year}|${r.month}`,
-    ),
-  );
-  const extra = (await allCachedRoutes()).filter(
-    (r) =>
-      !primarySet.has(
-        `${r.scheduleType}|${r.from}|${r.to}|${r.year}|${r.month}`,
-      ),
-  );
-  if (extra.length > 0) await warmRoutes(extra);
 }
