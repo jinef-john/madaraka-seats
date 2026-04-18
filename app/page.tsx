@@ -21,21 +21,30 @@ import {
 import { cn } from "@/lib/utils";
 import { MonthCalendar } from "@/components/MonthCalendar";
 import { DaySheet } from "@/components/DaySheet";
-import { TRAIN_TYPE_CONFIG } from "@/utils/train-config";
+import { TRAIN_TYPE_CONFIG, lastBookableDate } from "@/utils/train-config";
 import type { MonthResponse, TrainType } from "@/types/train";
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const METICKETS_BASE = "https://metickets.krc.co.ke";
-const MAX_MONTHS_AHEAD = 2;
 const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
 ];
 const LEGEND = [
   { label: "Available", bar: "bg-amber-container" },
-  { label: "Filling",   bar: "bg-primary/70" },
-  { label: "Sold Out",  bar: "bg-destructive/40" },
+  { label: "Filling", bar: "bg-primary/70" },
+  { label: "Sold Out", bar: "bg-destructive/40" },
 ] as const;
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -131,8 +140,11 @@ function CalendarPage() {
     queryKey: ["month", scheduleType, from, to, year, month],
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({
-        scheduleType, from, to,
-        year: String(year), month: String(month),
+        scheduleType,
+        from,
+        to,
+        year: String(year),
+        month: String(month),
       });
       const res = await fetch(`/api/trains/month?${params}`, { signal });
       if (!res.ok) {
@@ -153,25 +165,26 @@ function CalendarPage() {
     (year === now.getFullYear() && month > now.getMonth() + 1);
 
   const canGoNext = (() => {
-    const max = new Date(now);
-    max.setMonth(max.getMonth() + MAX_MONTHS_AHEAD);
-    return (
-      year < max.getFullYear() ||
-      (year === max.getFullYear() && month < max.getMonth() + 1)
-    );
+    const lastDate = lastBookableDate(scheduleType);
+    const [ly, lm] = lastDate.split("-").map(Number);
+    return year < ly || (year === ly && month < lm);
   })();
 
   const goPrev = () => {
     if (!canGoPrev) return;
     const [ny, nm] = month === 1 ? [year - 1, 12] : [year, month - 1];
-    setYear(ny); setMonth(nm); setSelectedDate(null);
+    setYear(ny);
+    setMonth(nm);
+    setSelectedDate(null);
     pushUrl({ year: ny, month: nm });
   };
 
   const goNext = () => {
     if (!canGoNext) return;
     const [ny, nm] = month === 12 ? [year + 1, 1] : [year, month + 1];
-    setYear(ny); setMonth(nm); setSelectedDate(null);
+    setYear(ny);
+    setMonth(nm);
+    setSelectedDate(null);
     pushUrl({ year: ny, month: nm });
   };
 
@@ -228,7 +241,10 @@ function CalendarPage() {
   const LegendItems = () => (
     <>
       {LEGEND.map(({ label, bar }) => (
-        <div key={label} className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div
+          key={label}
+          className="flex items-center gap-2 text-xs text-muted-foreground"
+        >
           <span className={cn("w-4 h-[3px] rounded-full shrink-0", bar)} />
           {label}
         </div>
@@ -239,7 +255,6 @@ function CalendarPage() {
   return (
     <div className="min-h-screen bg-background">
       <div className="flex min-h-screen max-w-5xl mx-auto">
-
         {/* ── Sidebar (lg+) ──────────────────────────────────────────────── */}
         <aside
           className={cn(
@@ -264,14 +279,18 @@ function CalendarPage() {
               Route
             </p>
             <div className="space-y-0.5">
-              <p className="text-[10px] text-muted-foreground/70 pl-0.5">From</p>
+              <p className="text-[10px] text-muted-foreground/70 pl-0.5">
+                From
+              </p>
               <Select value={from} onValueChange={handleFromChange}>
                 <SelectTrigger className="w-full h-9 text-sm rounded-xl">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {originOptions.map((s) => (
-                    <SelectItem key={s} value={s}>{s}</SelectItem>
+                    <SelectItem key={s} value={s}>
+                      {s}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -287,7 +306,9 @@ function CalendarPage() {
                 </SelectTrigger>
                 <SelectContent>
                   {destOptions.map((s) => (
-                    <SelectItem key={s} value={s}>{s}</SelectItem>
+                    <SelectItem key={s} value={s}>
+                      {s}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -300,7 +321,9 @@ function CalendarPage() {
             disabled={isPending}
             className="w-full rounded-xl gap-2 text-sm"
           >
-            <RefreshCw className={cn("size-3.5", isPending && "animate-spin")} />
+            <RefreshCw
+              className={cn("size-3.5", isPending && "animate-spin")}
+            />
             Refresh
           </Button>
 
@@ -315,7 +338,12 @@ function CalendarPage() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors mt-2"
             >
-              <svg className="size-3.5" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <svg
+                className="size-3.5"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                aria-hidden="true"
+              >
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z" />
               </svg>
               Source
@@ -325,7 +353,6 @@ function CalendarPage() {
 
         {/* ── Main content ───────────────────────────────────────────────── */}
         <main className="flex-1 min-w-0 px-4 sm:px-6 lg:px-8 py-8 lg:py-10">
-
           {/* Mobile brand + controls */}
           <div className="lg:hidden mb-7 space-y-5">
             <Brand />
@@ -338,27 +365,38 @@ function CalendarPage() {
                   </SelectTrigger>
                   <SelectContent>
                     {originOptions.map((s) => (
-                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <span className="text-muted-foreground text-sm select-none">→</span>
+                <span className="text-muted-foreground text-sm select-none">
+                  →
+                </span>
                 <Select value={to} onValueChange={handleToChange}>
                   <SelectTrigger className="w-[155px] h-9 text-sm rounded-xl">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     {destOptions.map((s) => (
-                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                      <SelectItem key={s} value={s}>
+                        {s}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 <Button
-                  variant="ghost" size="icon"
-                  onClick={() => refetch()} disabled={isPending}
-                  className="h-9 w-9 rounded-xl" title="Refresh"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => refetch()}
+                  disabled={isPending}
+                  className="h-9 w-9 rounded-xl"
+                  title="Refresh"
                 >
-                  <RefreshCw className={cn("size-3.5", isPending && "animate-spin")} />
+                  <RefreshCw
+                    className={cn("size-3.5", isPending && "animate-spin")}
+                  />
                 </Button>
               </div>
             </div>
@@ -369,7 +407,9 @@ function CalendarPage() {
             <div>
               <h1 className="text-3xl font-bold tracking-tight text-foreground leading-none">
                 {MONTH_NAMES[month - 1]}
-                <span className="text-muted-foreground font-normal ml-2.5">{year}</span>
+                <span className="text-muted-foreground font-normal ml-2.5">
+                  {year}
+                </span>
               </h1>
               {errorMsg && (
                 <p className="text-xs text-destructive mt-1.5">{errorMsg}</p>
@@ -377,14 +417,20 @@ function CalendarPage() {
             </div>
             <div className="flex items-center gap-0.5">
               <Button
-                variant="ghost" size="icon" onClick={goPrev}
-                disabled={!canGoPrev || isPending} className="h-8 w-8 rounded-full"
+                variant="ghost"
+                size="icon"
+                onClick={goPrev}
+                disabled={!canGoPrev || isPending}
+                className="h-8 w-8 rounded-full"
               >
                 <ChevronLeft className="size-4" />
               </Button>
               <Button
-                variant="ghost" size="icon" onClick={goNext}
-                disabled={!canGoNext || isPending} className="h-8 w-8 rounded-full"
+                variant="ghost"
+                size="icon"
+                onClick={goNext}
+                disabled={!canGoNext || isPending}
+                className="h-8 w-8 rounded-full"
               >
                 <ChevronRight className="size-4" />
               </Button>
@@ -393,9 +439,13 @@ function CalendarPage() {
 
           {/* Calendar grid */}
           <MonthCalendar
-            year={year} month={month}
-            days={monthDays} loading={isPending}
-            selectedDate={selectedDate} onDayClick={setSelectedDate}
+            year={year}
+            month={month}
+            days={monthDays}
+            loading={isPending}
+            selectedDate={selectedDate}
+            onDayClick={setSelectedDate}
+            lastBookable={lastBookableDate(scheduleType)}
           />
 
           {/* Mobile legend */}
@@ -408,19 +458,28 @@ function CalendarPage() {
               className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
               title="Source on GitHub"
             >
-              <svg className="size-4" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <svg
+                className="size-4"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                aria-hidden="true"
+              >
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z" />
               </svg>
             </a>
           </div>
-
         </main>
       </div>
 
       <DaySheet
-        day={selectedDate ? (selectedDay ?? { date: selectedDate, trains: [] }) : null}
+        day={
+          selectedDate
+            ? (selectedDay ?? { date: selectedDate, trains: [] })
+            : null
+        }
         scheduleType={scheduleType}
-        from={from} to={to}
+        from={from}
+        to={to}
         bookingUrl={METICKETS_BASE}
         onClose={() => setSelectedDate(null)}
       />

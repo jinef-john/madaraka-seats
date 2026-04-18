@@ -9,7 +9,7 @@ import type {
   StandardTrainResult,
   TrainSearchResult,
 } from "@/types/train";
-import { METICKETS_BASE_URL } from "@/utils/train-config";
+import { METICKETS_BASE_URL, lastBookableDate } from "@/utils/train-config";
 
 // ---------------------------------------------------------------------------
 // Upstream path constants
@@ -601,11 +601,14 @@ export async function scrapeSearch(
 
       const matching = parsed.filter(
         (r) =>
-          r.from.toLowerCase() === fromLower &&
-          r.to.toLowerCase() === toLower,
+          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
       );
 
-      if (matching.length === 0 && options.schedule !== "phase2" && isSoldOut(response.text)) {
+      if (
+        matching.length === 0 &&
+        options.schedule !== "phase2" &&
+        isSoldOut(response.text)
+      ) {
         soldOutSlots.push(option.value);
       }
 
@@ -655,7 +658,12 @@ export async function scrapeSearch(
           to: toOption.label,
           departure: dep,
           arrival: "",
-          fare: { economyAdult: "", economyChild: "", firstAdult: "", firstChild: "" },
+          fare: {
+            economyAdult: "",
+            economyChild: "",
+            firstAdult: "",
+            firstChild: "",
+          },
           openSeats: { economy: "0", firstClass: "0" },
           coachOptions: [],
           bookingEndpoint: "",
@@ -751,11 +759,15 @@ async function scrapeDayWithSession(
 
       const matching = parsed.filter(
         (r) =>
-          r.from.toLowerCase() === fromLower &&
-          r.to.toLowerCase() === toLower,
+          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
       );
 
-      if (matching.length === 0 && option.value && config.schedule !== "phase2" && isSoldOut(response.text)) {
+      if (
+        matching.length === 0 &&
+        option.value &&
+        config.schedule !== "phase2" &&
+        isSoldOut(response.text)
+      ) {
         soldOutSlots.push(option.value);
       }
 
@@ -884,10 +896,11 @@ export async function scrapeMonthStreaming(
   const daysInMonth = new Date(year, month, 0).getDate();
   const now = new Date();
   const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const horizonStr = lastBookableDate(schedule);
   const dates = Array.from({ length: daysInMonth }, (_, i) => {
     const d = i + 1;
     return `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-  }).filter((date) => date >= todayStr);
+  }).filter((date) => date >= todayStr && date <= horizonStr);
 
   const chunkSize = Math.ceil(dates.length / MONTH_CONCURRENCY);
   const chunks: string[][] = [];
