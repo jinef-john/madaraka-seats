@@ -1,15 +1,15 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import type { MonthDay, MonthDayTrain } from "@/types/train";
+import type { MonthDay } from "@/types/train";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 type Status = "high" | "filling" | "sold-out" | "none";
 
-function getStatus(trains: MonthDayTrain[]): Status {
-  if (!trains.length) return "none";
-  const total = trains.reduce(
+function getStatus(day: MonthDay): Status {
+  if (!day.trains.length) return day.fullyBooked ? "sold-out" : "none";
+  const total = day.trains.reduce(
     (s, t) => s + t.economy + t.firstClass + (t.premium ?? 0),
     0,
   );
@@ -18,8 +18,8 @@ function getStatus(trains: MonthDayTrain[]): Status {
   return "filling";
 }
 
-function totalSeats(trains: MonthDayTrain[]) {
-  return trains.reduce(
+function totalSeats(day: MonthDay) {
+  return day.trains.reduce(
     (s, t) => s + t.economy + t.firstClass + (t.premium ?? 0),
     0,
   );
@@ -129,8 +129,8 @@ export function MonthCalendar({
           const isPast = dateStr < todayStr;
           const isToday = dateStr === todayStr;
           const isSelected = dateStr === selectedDate;
-          const status = stored ? getStatus(stored.trains) : "none";
-          const seats = stored ? totalSeats(stored.trains) : 0;
+          const status = stored ? getStatus(stored) : "none";
+          const seats = stored ? totalSeats(stored) : 0;
 
           return (
             <button

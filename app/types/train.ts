@@ -109,6 +109,8 @@ export interface MonthDay {
   /** YYYY-MM-DD */
   date: string;
   trains: MonthDayTrain[];
+  /** True when the site indicated sold-out (no bookable forms) */
+  fullyBooked?: boolean;
 }
 
 export interface MonthResponse {

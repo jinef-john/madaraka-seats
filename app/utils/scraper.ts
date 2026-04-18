@@ -629,9 +629,11 @@ export async function scrapeSearch(
     // Detect sold-out: at least one slot returned sold-out with no matching results
     const fullyBooked = soldOutSlots.length > 0;
 
-    // For non-blank sold-out slots, create synthetic entries so the DaySheet
-    // shows them as "Sold Out" rather than hiding them entirely.
-    if (fullyBooked) {
+    // Express only: create synthetic sold-out entries for specific departure
+    // slots so the DaySheet shows them alongside available trains.
+    // Inter-county and phase2 don't have trains at the shared 3PM/10PM slots,
+    // so they just use the fullyBooked flag for a generic message.
+    if (fullyBooked && options.schedule === "express") {
       const foundDepartures = new Set(
         results.map((r) => {
           const hhmm = r.departure.match(/(\d{2}):(\d{2})/);
@@ -639,52 +641,30 @@ export async function scrapeSearch(
         }),
       );
       for (const slot of soldOutSlots) {
-        if (!slot) continue; // skip blank
+        if (!slot) continue;
         const depOpt = departuresToQuery.find((o) => o.value === slot);
         const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
         if (!dep || foundDepartures.has(dep)) continue;
 
-        if (options.schedule === "inter_county") {
-          results.push({
-            resultType: "premium",
-            title: "",
-            trainId: "",
-            trainNo: "",
-            from: fromOption.label,
-            to: toOption.label,
-            departure: dep,
-            arrival: "",
-            coach: "",
-            fares: { premiumAdult: "", premiumChild: "" },
-            seatGroups: [],
-            bookingEndpoint: "",
-            reviewEndpoint: "",
-            queriedDeparture: slot,
-            queriedDepartureLabel: depOpt?.label || slot,
-            statusCode: 200,
-            protocol: "",
-          } as PremiumTrainResult);
-        } else {
-          results.push({
-            resultType: "standard",
-            title: "",
-            trainId: "",
-            trainNo: "",
-            from: fromOption.label,
-            to: toOption.label,
-            departure: dep,
-            arrival: "",
-            fare: { economyAdult: "", economyChild: "", firstAdult: "", firstChild: "" },
-            openSeats: { economy: "0", firstClass: "0" },
-            coachOptions: [],
-            bookingEndpoint: "",
-            reviewEndpoint: "",
-            queriedDeparture: slot,
-            queriedDepartureLabel: depOpt?.label || slot,
-            statusCode: 200,
-            protocol: "",
-          } as StandardTrainResult);
-        }
+        results.push({
+          resultType: "standard",
+          title: "",
+          trainId: "",
+          trainNo: "",
+          from: fromOption.label,
+          to: toOption.label,
+          departure: dep,
+          arrival: "",
+          fare: { economyAdult: "", economyChild: "", firstAdult: "", firstChild: "" },
+          openSeats: { economy: "0", firstClass: "0" },
+          coachOptions: [],
+          bookingEndpoint: "",
+          reviewEndpoint: "",
+          queriedDeparture: slot,
+          queriedDepartureLabel: depOpt?.label || slot,
+          statusCode: 200,
+          protocol: "",
+        } as StandardTrainResult);
       }
     }
 
@@ -798,24 +778,29 @@ async function scrapeDayWithSession(
     (r) => `${r.trainId}|${r.trainNo}|${r.departure}`,
   ).map(toMonthDayTrain);
 
-  // For departure slots that returned "Fully Booked" with no parseable forms,
-  // add a synthetic sold-out entry so the calendar shows the train exists.
-  const foundDepartures = new Set(trains.map((t) => t.departure));
-  for (const slot of soldOutSlots) {
-    const depOpt = config.departuresToQuery.find((o) => o.value === slot);
-    const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
-    if (dep && !foundDepartures.has(dep)) {
-      trains.push({
-        trainNo: "",
-        departure: dep,
-        economy: 0,
-        firstClass: 0,
-        premium: 0,
-      });
+  const fullyBooked = soldOutSlots.length > 0;
+
+  // Express only: synthetic sold-out entries for specific departure slots.
+  // The 3PM/10PM slots map to real express trains. Inter-county and phase2
+  // don't have trains at those times, so they just use the fullyBooked flag.
+  if (fullyBooked && config.schedule === "express") {
+    const foundDepartures = new Set(trains.map((t) => t.departure));
+    for (const slot of soldOutSlots) {
+      const depOpt = config.departuresToQuery.find((o) => o.value === slot);
+      const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
+      if (dep && !foundDepartures.has(dep)) {
+        trains.push({
+          trainNo: "",
+          departure: dep,
+          economy: 0,
+          firstClass: 0,
+          premium: 0,
+        });
+      }
     }
   }
 
-  return { date: config.date, trains };
+  return { date: config.date, trains, fullyBooked };
 }
 
 // How many parallel PHP sessions to open for a month scrape.
