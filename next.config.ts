@@ -7,6 +7,9 @@ const nextConfig: NextConfig = {
   // imported directly inside a route handler, Next.js/Turbopack will leave
   // it unbundled and let Node.js require() handle it natively.
   serverExternalPackages: ["httpcloak"],
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
+  // Enables the stable `use cache` directive (and cacheLife / cacheTag APIs).
+  cacheComponents: true,
 };
 
 export default nextConfig;
