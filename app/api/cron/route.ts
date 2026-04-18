@@ -1,12 +1,9 @@
-import type { NextRequest } from "next/server";
+import { verifySignatureAppRouter } from "@upstash/qstash/nextjs";
 import { refresh } from "@/utils/background-refresh";
 
-export async function GET(request: NextRequest) {
-  const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+async function handler() {
   await refresh();
   return Response.json({ ok: true });
 }
+
+export const POST = verifySignatureAppRouter(handler);
