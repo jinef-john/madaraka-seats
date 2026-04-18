@@ -66,16 +66,35 @@ interface TrainInfo {
   fares: FareRow[];
 }
 
-function fromSearchResult(r: StandardTrainResult | PremiumTrainResult): TrainInfo {
+function fromSearchResult(
+  r: StandardTrainResult | PremiumTrainResult,
+): TrainInfo {
   if (r.resultType === "standard") {
     const eco = parseInt(r.openSeats.economy, 10) || 0;
     const fc = parseInt(r.openSeats.firstClass, 10) || 0;
     const seatClasses: SeatClass[] = [{ label: "Economy", count: eco }];
-    if (fc > 0 || r.fare.firstAdult) seatClasses.push({ label: "1st Class", count: fc });
+    if (fc > 0 || r.fare.firstAdult)
+      seatClasses.push({ label: "1st Class", count: fc });
     const fares: FareRow[] = [];
-    if (r.fare.economyAdult) fares.push({ label: "Economy", adult: r.fare.economyAdult, child: r.fare.economyChild });
-    if (r.fare.firstAdult) fares.push({ label: "1st Class", adult: r.fare.firstAdult, child: r.fare.firstChild });
-    return { trainNo: r.trainNo, departure: r.departure, totalSeats: eco + fc, seatClasses, fares };
+    if (r.fare.economyAdult)
+      fares.push({
+        label: "Economy",
+        adult: r.fare.economyAdult,
+        child: r.fare.economyChild,
+      });
+    if (r.fare.firstAdult)
+      fares.push({
+        label: "1st Class",
+        adult: r.fare.firstAdult,
+        child: r.fare.firstChild,
+      });
+    return {
+      trainNo: r.trainNo,
+      departure: r.departure,
+      totalSeats: eco + fc,
+      seatClasses,
+      fares,
+    };
   }
   const totalSeats = r.seatGroups.reduce((sum, g) => {
     const avail =
@@ -85,7 +104,12 @@ function fromSearchResult(r: StandardTrainResult | PremiumTrainResult): TrainInf
     return sum + avail;
   }, 0);
   const fares: FareRow[] = [];
-  if (r.fares.premiumAdult) fares.push({ label: "Premium", adult: r.fares.premiumAdult, child: r.fares.premiumChild });
+  if (r.fares.premiumAdult)
+    fares.push({
+      label: "Premium",
+      adult: r.fares.premiumAdult,
+      child: r.fares.premiumChild,
+    });
   return {
     trainNo: r.trainNo,
     departure: r.departure,
@@ -95,15 +119,66 @@ function fromSearchResult(r: StandardTrainResult | PremiumTrainResult): TrainInf
   };
 }
 
-function fromMonthTrain(t: { trainNo: string; departure: string; economy: number; firstClass: number; premium?: number }): TrainInfo {
+/** Extract HH:MM from a departure string (handles "2026-05-20 08:00:00" and "08:00"). */
+function extractHHMM(dep: string): string {
+  const m = dep.match(/(\d{1,2}):(\d{2})/);
+  return m ? `${m[1].padStart(2, "0")}:${m[2]}` : dep;
+}
+
+/**
+ * Merge search results by departure time so that one physical train
+ * (which has separate standard and premium entries) becomes one TrainInfo card.
+ */
+function mergeSearchResults(
+  results: (StandardTrainResult | PremiumTrainResult)[],
+): TrainInfo[] {
+  const infos = results.map(fromSearchResult);
+  const byDep = new Map<string, TrainInfo>();
+
+  for (const info of infos) {
+    const hm = extractHHMM(info.departure);
+    const existing = byDep.get(hm);
+    if (existing) {
+      // Merge seat classes (avoid duplicates)
+      for (const sc of info.seatClasses) {
+        if (!existing.seatClasses.find((e) => e.label === sc.label)) {
+          existing.seatClasses.push(sc);
+        }
+      }
+      // Merge fares
+      for (const f of info.fares) {
+        if (!existing.fares.find((e) => e.label === f.label)) {
+          existing.fares.push(f);
+        }
+      }
+      existing.totalSeats += info.totalSeats;
+      // Keep the standard trainNo (more recognizable)
+      if (!existing.trainNo) existing.trainNo = info.trainNo;
+    } else {
+      byDep.set(hm, { ...info });
+    }
+  }
+
+  return [...byDep.values()];
+}
+
+function fromMonthTrain(t: {
+  trainNo: string;
+  departure: string;
+  economy: number;
+  firstClass: number;
+  premium?: number;
+}): TrainInfo {
   const premium = t.premium ?? 0;
   const seatClasses: SeatClass[] = [];
   if (t.economy > 0 || t.firstClass > 0) {
     seatClasses.push({ label: "Economy", count: t.economy });
-    if (t.firstClass > 0) seatClasses.push({ label: "1st Class", count: t.firstClass });
+    if (t.firstClass > 0)
+      seatClasses.push({ label: "1st Class", count: t.firstClass });
   }
   if (premium > 0) seatClasses.push({ label: "Premium", count: premium });
-  if (seatClasses.length === 0) seatClasses.push({ label: "Economy", count: 0 });
+  if (seatClasses.length === 0)
+    seatClasses.push({ label: "Economy", count: 0 });
   return {
     trainNo: t.trainNo,
     departure: t.departure,
@@ -123,8 +198,14 @@ function TrainCard({
   fares,
   bookingUrl,
 }: TrainInfo & { bookingUrl: string }) {
-  const avail = totalSeats === 0 ? "sold-out" : totalSeats >= 1000 ? "high" : "filling";
-  const cols = seatClasses.length === 1 ? "grid-cols-1" : seatClasses.length === 3 ? "grid-cols-3" : "grid-cols-2";
+  const avail =
+    totalSeats === 0 ? "sold-out" : totalSeats >= 1000 ? "high" : "filling";
+  const cols =
+    seatClasses.length === 1
+      ? "grid-cols-1"
+      : seatClasses.length === 3
+        ? "grid-cols-3"
+        : "grid-cols-2";
 
   return (
     <div className="rounded-2xl border border-border/50 bg-card overflow-hidden">
@@ -152,12 +233,18 @@ function TrainCard({
                   avail === "sold-out" && "bg-destructive/10 text-destructive",
                 )}
               >
-                {avail === "high" ? "Available" : avail === "filling" ? "Filling Fast" : "Sold Out"}
+                {avail === "high"
+                  ? "Available"
+                  : avail === "filling"
+                    ? "Filling Fast"
+                    : "Sold Out"}
               </span>
             </div>
             <div className="flex items-center gap-1.5 text-foreground">
               <Clock className="size-3.5 text-muted-foreground shrink-0" />
-              <span className="text-lg font-semibold leading-none">{formatTime(departure)}</span>
+              <span className="text-lg font-semibold leading-none">
+                {formatTime(departure)}
+              </span>
             </div>
           </div>
 
@@ -201,12 +288,16 @@ function TrainCard({
               Fares (adult / child)
             </p>
             {fares.map((row) => (
-              <div key={row.label} className="flex items-center justify-between text-xs">
+              <div
+                key={row.label}
+                className="flex items-center justify-between text-xs"
+              >
                 <span className="text-muted-foreground">{row.label}</span>
                 <span className="font-medium tabular-nums">
                   {row.adult}
                   <span className="text-muted-foreground/70 font-normal">
-                    {" "}/ {row.child}
+                    {" "}
+                    / {row.child}
                   </span>
                 </span>
               </div>
@@ -229,24 +320,47 @@ interface Props {
   onClose: () => void;
 }
 
-export function DaySheet({ day, scheduleType, from, to, bookingUrl, onClose }: Props) {
+export function DaySheet({
+  day,
+  scheduleType,
+  from,
+  to,
+  bookingUrl,
+  onClose,
+}: Props) {
   const isOpen = day !== null;
   const date = day ? formatDate(day.date) : null;
 
-  const { data: searchData, isPending: isSearching } = useQuery<SearchResponse>({
-    queryKey: ["search", scheduleType, from, to, day?.date],
-    queryFn: async ({ signal }) => {
-      const params = new URLSearchParams({ scheduleType, from, to, date: day!.date });
-      const res = await fetch(`/api/trains/search?${params}`, { signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
+  // If every train on this day already shows 0 seats in the month cache,
+  // skip the per-date search — let the background refresh handle updates.
+  const alreadySoldOut =
+    day !== null &&
+    day.trains.length > 0 &&
+    day.trains.every(
+      (t) => t.economy + t.firstClass + (t.premium ?? 0) === 0,
+    );
+
+  const { data: searchData, isPending: isSearching } = useQuery<SearchResponse>(
+    {
+      queryKey: ["search", scheduleType, from, to, day?.date],
+      queryFn: async ({ signal }) => {
+        const params = new URLSearchParams({
+          scheduleType,
+          from,
+          to,
+          date: day!.date,
+        });
+        const res = await fetch(`/api/trains/search?${params}`, { signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      },
+      enabled: isOpen && !alreadySoldOut,
+      staleTime: 30_000,
     },
-    enabled: isOpen,
-    staleTime: 30_000,
-  });
+  );
 
   const trains: TrainInfo[] = searchData?.results
-    ? searchData.results.map(fromSearchResult)
+    ? mergeSearchResults(searchData.results)
     : (day?.trains ?? []).map(fromMonthTrain);
 
   return (
@@ -326,9 +440,11 @@ export function DaySheet({ day, scheduleType, from, to, bookingUrl, onClose }: P
             {isSearching && trains.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Loader2 className="size-6 animate-spin text-muted-foreground/40 mb-4" />
-                <p className="text-sm text-muted-foreground">Loading availability…</p>
+                <p className="text-sm text-muted-foreground">
+                  Loading availability…
+                </p>
               </div>
-            ) : trains.length === 0 && searchData?.fullyBooked ? (
+            ) : trains.length === 0 && (searchData?.fullyBooked || alreadySoldOut) ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="w-12 h-12 rounded-2xl bg-destructive/10 flex items-center justify-center mb-4">
                   <X className="size-5 text-destructive/60" />
@@ -343,14 +459,20 @@ export function DaySheet({ day, scheduleType, from, to, bookingUrl, onClose }: P
                 <div className="w-12 h-12 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
                   <Clock className="size-5 text-muted-foreground/50" />
                 </div>
-                <p className="font-semibold text-foreground">No trains listed</p>
+                <p className="font-semibold text-foreground">
+                  No trains listed
+                </p>
                 <p className="text-sm text-muted-foreground mt-1 max-w-[180px]">
                   Availability may not be published yet for this date.
                 </p>
               </div>
             ) : (
               trains.map((train, i) => (
-                <TrainCard key={train.trainNo || `train-${i}`} {...train} bookingUrl={bookingUrl} />
+                <TrainCard
+                  key={train.trainNo || `train-${i}`}
+                  {...train}
+                  bookingUrl={bookingUrl}
+                />
               ))
             )}
           </div>

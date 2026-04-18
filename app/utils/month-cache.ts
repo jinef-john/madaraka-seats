@@ -58,3 +58,11 @@ export async function allCachedRoutes(): Promise<
     };
   });
 }
+
+/** Delete all cached month entries from Redis. */
+export async function flushMonthCache(): Promise<number> {
+  const keys = await redis.keys("month:*");
+  if (keys.length === 0) return 0;
+  await redis.del(...keys);
+  return keys.length;
+}
