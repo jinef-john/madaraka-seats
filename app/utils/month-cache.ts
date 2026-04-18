@@ -1,10 +1,9 @@
 import type { MonthDay, TrainType } from "@/types/train";
+import { redis } from "@/utils/redis";
 
-interface Entry {
-  days: MonthDay[];
-}
-
-const store = new Map<string, Entry>();
+const TTL = Math.ceil(
+  parseInt(process.env.CACHE_REFRESH_INTERVAL_MS ?? "300000", 10) / 1000,
+);
 
 function key(
   t: TrainType,
@@ -13,20 +12,21 @@ function key(
   year: number,
   month: number,
 ) {
-  return `${t}|${from}|${to}|${year}|${month}`;
+  return `month:${t}|${from}|${to}|${year}|${month}`;
 }
 
-export function getMonth(
+export async function getMonth(
   t: TrainType,
   from: string,
   to: string,
   year: number,
   month: number,
-): MonthDay[] | null {
-  return store.get(key(t, from, to, year, month))?.days ?? null;
+): Promise<MonthDay[] | null> {
+  const data = await redis.get<MonthDay[]>(key(t, from, to, year, month));
+  return data ?? null;
 }
 
-export function setMonth(
+export async function setMonth(
   t: TrainType,
   from: string,
   to: string,
@@ -34,24 +34,27 @@ export function setMonth(
   month: number,
   days: MonthDay[],
 ) {
-  store.set(key(t, from, to, year, month), { days });
+  await redis.set(key(t, from, to, year, month), days, { ex: TTL });
 }
 
-export function allCachedRoutes(): {
-  scheduleType: TrainType;
-  from: string;
-  to: string;
-  year: number;
-  month: number;
-}[] {
-  return Array.from(store.keys()).map((k) => {
-    const [scheduleType, from, to, year, month] = k.split("|");
+export async function allCachedRoutes(): Promise<
+  {
+    scheduleType: TrainType;
+    from: string;
+    to: string;
+    year: number;
+    month: number;
+  }[]
+> {
+  const keys = await redis.keys("month:*");
+  return keys.map((k) => {
+    const parts = k.replace("month:", "").split("|");
     return {
-      scheduleType: scheduleType as TrainType,
-      from,
-      to,
-      year: Number(year),
-      month: Number(month),
+      scheduleType: parts[0] as TrainType,
+      from: parts[1],
+      to: parts[2],
+      year: Number(parts[3]),
+      month: Number(parts[4]),
     };
   });
 }

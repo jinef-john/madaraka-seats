@@ -9,9 +9,9 @@ export async function getCachedMonth(
   year: number,
   month: number,
 ) {
-  const cached = getMonth(scheduleType, from, to, year, month);
+  const cached = await getMonth(scheduleType, from, to, year, month);
   if (cached) return cached;
   const days = await scrapeMonth(scheduleType, from, to, year, month);
-  setMonth(scheduleType, from, to, year, month, days);
+  await setMonth(scheduleType, from, to, year, month, days);
   return days;
 }

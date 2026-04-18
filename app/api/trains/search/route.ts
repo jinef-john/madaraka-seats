@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const cacheKey = `${scheduleType}|${from}|${to}|${date}|${departure ?? ""}`;
-    const cached = getSearch(cacheKey);
+    const cached = await getSearch(cacheKey);
     if (cached) {
       return Response.json(cached, {
         headers: { "Cache-Control": "no-store" },
@@ -71,7 +71,7 @@ export async function GET(request: NextRequest) {
       allTrains,
     });
 
-    setSearch(cacheKey, data);
+    await setSearch(cacheKey, data);
     return Response.json(data, {
       headers: {
         "Cache-Control": "no-store",

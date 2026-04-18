@@ -3,11 +3,6 @@ import { scrapeMonth } from "@/utils/scraper";
 import { setMonth, allCachedRoutes } from "@/utils/month-cache";
 import type { TrainType } from "@/types/train";
 
-const INTERVAL_MS = parseInt(
-  process.env.CACHE_REFRESH_INTERVAL_MS ?? "300000",
-  10,
-);
-
 function upcomingMonths(): { year: number; month: number }[] {
   const now = new Date();
   return [0, 1, 2].map((i) => {
@@ -34,17 +29,16 @@ async function warmRoutes(
         r.year,
         r.month,
       );
-      setMonth(r.scheduleType, r.from, r.to, r.year, r.month, days);
+      await setMonth(r.scheduleType, r.from, r.to, r.year, r.month, days);
     } catch {
       // retain previous data on error
     }
   }
 }
 
-async function refresh() {
+export async function refresh() {
   const months = upcomingMonths();
 
-  // Primary routes: each type's default origin ↔ destination, both directions
   const primary: {
     scheduleType: TrainType;
     from: string;
@@ -64,28 +58,16 @@ async function refresh() {
   }
   await warmRoutes(primary);
 
-  // Re-warm any demand-cached routes accumulated since last refresh
   const primarySet = new Set(
     primary.map(
       (r) => `${r.scheduleType}|${r.from}|${r.to}|${r.year}|${r.month}`,
     ),
   );
-  const extra = allCachedRoutes().filter(
+  const extra = (await allCachedRoutes()).filter(
     (r) =>
       !primarySet.has(
         `${r.scheduleType}|${r.from}|${r.to}|${r.year}|${r.month}`,
       ),
   );
   if (extra.length > 0) await warmRoutes(extra);
-}
-
-let started = false;
-
-export function startBackgroundRefresh() {
-  if (started) return;
-  started = true;
-  void refresh();
-  setInterval(() => {
-    void refresh();
-  }, INTERVAL_MS);
 }
