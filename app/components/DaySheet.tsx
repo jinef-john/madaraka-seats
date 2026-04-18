@@ -331,17 +331,18 @@ export function DaySheet({
   const isOpen = day !== null;
   const date = day ? formatDate(day.date) : null;
 
-  // If every train on this day already shows 0 seats in the month cache,
+  // If the month cache already shows zero total seats for this day,
   // skip the per-date search — let the background refresh handle updates.
+  // Array.every on an empty array returns true, so this also covers
+  // Suswa/phase2 dates with no trains listed.
   const alreadySoldOut =
     day !== null &&
-    day.trains.length > 0 &&
     day.trains.every(
       (t) => t.economy + t.firstClass + (t.premium ?? 0) === 0,
     );
 
-  const { data: searchData, isPending: isSearching } = useQuery<SearchResponse>(
-    {
+  const { data: searchData, isFetching: isSearching } =
+    useQuery<SearchResponse>({
       queryKey: ["search", scheduleType, from, to, day?.date],
       queryFn: async ({ signal }) => {
         const params = new URLSearchParams({
@@ -356,8 +357,7 @@ export function DaySheet({
       },
       enabled: isOpen && !alreadySoldOut,
       staleTime: 30_000,
-    },
-  );
+    });
 
   const trains: TrainInfo[] = searchData?.results
     ? mergeSearchResults(searchData.results)
