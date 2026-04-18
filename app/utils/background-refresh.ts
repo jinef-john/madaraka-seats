@@ -3,7 +3,7 @@ import { scrapeMonth } from "@/utils/scraper";
 import { setMonth } from "@/utils/month-cache";
 import type { TrainType } from "@/types/train";
 
-const BATCH_SIZE = 3;
+const BATCH_SIZE = 6;
 
 /** Returns list of {year, month} pairs from now up to and including the month containing `lastDate`. */
 function monthsInRange(lastDate: string): { year: number; month: number }[] {
@@ -60,8 +60,8 @@ async function warmRoutes(
 }
 
 export async function refresh() {
-  // Warm default routes for all months within each type's booking horizon.
-  const primary: {
+  // Warm ALL route pairs for every month within each type's booking horizon.
+  const jobs: {
     scheduleType: TrainType;
     from: string;
     to: string;
@@ -70,14 +70,15 @@ export async function refresh() {
   }[] = [];
   for (const cfg of Object.values(TRAIN_TYPE_CONFIG)) {
     const months = monthsInRange(lastBookableDate(cfg.type));
+    const pairs = Object.entries(cfg.knownDestinationsByOrigin);
     for (const { year, month } of months) {
-      for (const [from, to] of [
-        [cfg.defaultOrigin, cfg.defaultDestination],
-        [cfg.defaultDestination, cfg.defaultOrigin],
-      ]) {
-        primary.push({ scheduleType: cfg.type, from, to, year, month });
+      for (const [from, destinations] of pairs) {
+        for (const to of destinations) {
+          jobs.push({ scheduleType: cfg.type, from, to, year, month });
+        }
       }
     }
   }
-  await warmRoutes(primary);
+  console.log(`[refresh] warming ${jobs.length} route-months`);
+  await warmRoutes(jobs);
 }
