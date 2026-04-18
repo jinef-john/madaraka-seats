@@ -9,14 +9,20 @@ type Status = "high" | "filling" | "sold-out" | "none";
 
 function getStatus(trains: MonthDayTrain[]): Status {
   if (!trains.length) return "none";
-  const total = trains.reduce((s, t) => s + t.economy + t.firstClass, 0);
+  const total = trains.reduce(
+    (s, t) => s + t.economy + t.firstClass + (t.premium ?? 0),
+    0,
+  );
   if (total === 0) return "sold-out";
   if (total >= 1000) return "high";
   return "filling";
 }
 
 function totalSeats(trains: MonthDayTrain[]) {
-  return trains.reduce((s, t) => s + t.economy + t.firstClass, 0);
+  return trains.reduce(
+    (s, t) => s + t.economy + t.firstClass + (t.premium ?? 0),
+    0,
+  );
 }
 
 /** Compact seat count: 1940 → "1.9k", 450 → "450", 0 → "full" */
@@ -27,11 +33,11 @@ function fmtSeats(n: number): string {
 
 // ─── style maps ───────────────────────────────────────────────────────────────
 
-// Background tint per status — clear enough to read at a glance
+// Background tint per status
 const TINT: Record<Status, string> = {
   high: "bg-amber-container/25 hover:bg-amber-container/40",
   filling: "bg-primary/[0.10] hover:bg-primary/[0.18]",
-  "sold-out": "bg-muted/50 hover:bg-muted/70",
+  "sold-out": "bg-destructive/8 hover:bg-destructive/14",
   none: "hover:bg-muted/30",
 };
 
@@ -39,15 +45,15 @@ const TINT: Record<Status, string> = {
 const BAR: Record<Status, string> = {
   high: "bg-amber-container",
   filling: "bg-primary/70",
-  "sold-out": "bg-muted-foreground/30",
+  "sold-out": "bg-destructive/40",
   none: "bg-transparent",
 };
 
-// Seat-count hint colour — matches tint family
+// Seat-count hint colour
 const HINT_COLOR: Record<Status, string> = {
   high: "text-amber",
   filling: "text-primary/75",
-  "sold-out": "text-muted-foreground/50",
+  "sold-out": "text-destructive/60",
   none: "",
 };
 

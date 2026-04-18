@@ -90,16 +90,19 @@ export interface RoutesResponse {
 export interface SearchResponse extends RoutesResponse {
   query: SearchQuery;
   results: TrainSearchResult[];
+  fullyBooked?: boolean;
 }
 
 export interface MonthDayTrain {
   trainNo: string;
   /** Departure time in HH:MM format */
   departure: string;
-  /** Open economy seats. For inter_county, holds total available seats. */
+  /** Open economy seats */
   economy: number;
-  /** Open first class seats. 0 for inter_county. */
+  /** Open first class seats */
   firstClass: number;
+  /** Open premium seats (inter_county only) */
+  premium: number;
 }
 
 export interface MonthDay {

@@ -1,4 +1,8 @@
-import type { RoutesResponse, SearchQuery, SearchResponse } from "@/types/train";
+import type {
+  RoutesResponse,
+  SearchQuery,
+  SearchResponse,
+} from "@/types/train";
 import { scrapeRoutes, scrapeSearch } from "@/utils/scraper";
 
 export async function getMeticketsRoutes(
@@ -15,14 +19,15 @@ export async function getMeticketsRoutes(
 export async function searchMetickets(
   query: SearchQuery,
 ): Promise<SearchResponse> {
-  const { terminals, destinations, departures, results } = await scrapeSearch({
-    schedule: query.scheduleType,
-    from: query.from,
-    to: query.to,
-    date: query.date,
-    departure: query.departure,
-    allTrains: query.allTrains,
-  });
+  const { terminals, destinations, departures, results, fullyBooked } =
+    await scrapeSearch({
+      schedule: query.scheduleType,
+      from: query.from,
+      to: query.to,
+      date: query.date,
+      departure: query.departure,
+      allTrains: query.allTrains,
+    });
   return {
     scheduleType: query.scheduleType,
     terminals,
@@ -30,5 +35,6 @@ export async function searchMetickets(
     departures,
     query,
     results,
+    fullyBooked,
   };
 }

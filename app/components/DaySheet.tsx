@@ -25,37 +25,57 @@ function formatDate(dateStr: string) {
 }
 
 function formatTime(dep: string): string {
-  const [h, m] = dep.split(":").map(Number);
+  // Handle full datetime like "2026-04-18 22:00:00" — extract HH:MM first
+  const timeMatch = dep.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (timeMatch) {
+    let h = parseInt(timeMatch[1], 10);
+    const m = parseInt(timeMatch[2], 10);
+    const isPm = timeMatch[3].toLowerCase() === "pm";
+    if (isPm && h !== 12) h += 12;
+    if (!isPm && h === 12) h = 0;
+    const period = h >= 12 ? "PM" : "AM";
+    return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${period}`;
+  }
+  // Extract HH:MM from datetime or plain time
+  const hhmm = dep.match(/(\d{2}):(\d{2})/);
+  if (!hhmm) return dep;
+  const h = parseInt(hhmm[1], 10);
+  const m = parseInt(hhmm[2], 10);
   const period = h >= 12 ? "PM" : "AM";
   return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${period}`;
 }
 
 // ─── normalised train shape ────────────────────────────────────────────────────
 
+interface SeatClass {
+  label: string;
+  count: number;
+}
+
+interface FareRow {
+  label: string;
+  adult: string;
+  child: string;
+}
+
 interface TrainInfo {
   trainNo: string;
   departure: string;
-  economy: number;
-  firstClass: number;
-  fare?: {
-    economyAdult?: string;
-    economyChild?: string;
-    firstAdult?: string;
-    firstChild?: string;
-    premiumAdult?: string;
-    premiumChild?: string;
-  };
+  totalSeats: number;
+  seatClasses: SeatClass[];
+  fares: FareRow[];
 }
 
 function fromSearchResult(r: StandardTrainResult | PremiumTrainResult): TrainInfo {
   if (r.resultType === "standard") {
-    return {
-      trainNo: r.trainNo,
-      departure: r.departure,
-      economy: parseInt(r.openSeats.economy, 10) || 0,
-      firstClass: parseInt(r.openSeats.firstClass, 10) || 0,
-      fare: r.fare,
-    };
+    const eco = parseInt(r.openSeats.economy, 10) || 0;
+    const fc = parseInt(r.openSeats.firstClass, 10) || 0;
+    const seatClasses: SeatClass[] = [{ label: "Economy", count: eco }];
+    if (fc > 0 || r.fare.firstAdult) seatClasses.push({ label: "1st Class", count: fc });
+    const fares: FareRow[] = [];
+    if (r.fare.economyAdult) fares.push({ label: "Economy", adult: r.fare.economyAdult, child: r.fare.economyChild });
+    if (r.fare.firstAdult) fares.push({ label: "1st Class", adult: r.fare.firstAdult, child: r.fare.firstChild });
+    return { trainNo: r.trainNo, departure: r.departure, totalSeats: eco + fc, seatClasses, fares };
   }
   const totalSeats = r.seatGroups.reduce((sum, g) => {
     const avail =
@@ -64,12 +84,32 @@ function fromSearchResult(r: StandardTrainResult | PremiumTrainResult): TrainInf
         : Math.max(0, g.seats.length - g.bookedSeats.length);
     return sum + avail;
   }, 0);
+  const fares: FareRow[] = [];
+  if (r.fares.premiumAdult) fares.push({ label: "Premium", adult: r.fares.premiumAdult, child: r.fares.premiumChild });
   return {
     trainNo: r.trainNo,
     departure: r.departure,
-    economy: totalSeats,
-    firstClass: 0,
-    fare: { premiumAdult: r.fares.premiumAdult, premiumChild: r.fares.premiumChild },
+    totalSeats,
+    seatClasses: [{ label: "Premium", count: totalSeats }],
+    fares,
+  };
+}
+
+function fromMonthTrain(t: { trainNo: string; departure: string; economy: number; firstClass: number; premium?: number }): TrainInfo {
+  const premium = t.premium ?? 0;
+  const seatClasses: SeatClass[] = [];
+  if (t.economy > 0 || t.firstClass > 0) {
+    seatClasses.push({ label: "Economy", count: t.economy });
+    if (t.firstClass > 0) seatClasses.push({ label: "1st Class", count: t.firstClass });
+  }
+  if (premium > 0) seatClasses.push({ label: "Premium", count: premium });
+  if (seatClasses.length === 0) seatClasses.push({ label: "Economy", count: 0 });
+  return {
+    trainNo: t.trainNo,
+    departure: t.departure,
+    totalSeats: t.economy + t.firstClass + premium,
+    seatClasses,
+    fares: [],
   };
 }
 
@@ -78,13 +118,13 @@ function fromSearchResult(r: StandardTrainResult | PremiumTrainResult): TrainInf
 function TrainCard({
   trainNo,
   departure,
-  economy,
-  firstClass,
-  fare,
+  totalSeats,
+  seatClasses,
+  fares,
   bookingUrl,
 }: TrainInfo & { bookingUrl: string }) {
-  const total = economy + firstClass;
-  const avail = total === 0 ? "sold-out" : total >= 1000 ? "high" : "filling";
+  const avail = totalSeats === 0 ? "sold-out" : totalSeats >= 1000 ? "high" : "filling";
+  const cols = seatClasses.length === 1 ? "grid-cols-1" : seatClasses.length === 3 ? "grid-cols-3" : "grid-cols-2";
 
   return (
     <div className="rounded-2xl border border-border/50 bg-card overflow-hidden">
@@ -93,7 +133,7 @@ function TrainCard({
           "h-1 w-full",
           avail === "high" && "bg-amber-container",
           avail === "filling" && "bg-primary",
-          avail === "sold-out" && "bg-muted-foreground/20",
+          avail === "sold-out" && "bg-destructive/40",
         )}
       />
 
@@ -102,14 +142,14 @@ function TrainCard({
           <div>
             <div className="flex items-center gap-2 mb-1">
               <span className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
-                Train {trainNo}
+                {trainNo ? `Train ${trainNo}` : "Train"}
               </span>
               <span
                 className={cn(
                   "text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full",
                   avail === "high" && "bg-amber-container/20 text-amber",
                   avail === "filling" && "bg-primary/10 text-primary",
-                  avail === "sold-out" && "bg-muted text-muted-foreground",
+                  avail === "sold-out" && "bg-destructive/10 text-destructive",
                 )}
               >
                 {avail === "high" ? "Available" : avail === "filling" ? "Filling Fast" : "Sold Out"}
@@ -121,7 +161,7 @@ function TrainCard({
             </div>
           </div>
 
-          {total > 0 && (
+          {totalSeats > 0 && (
             <Button asChild size="sm" className="rounded-full shrink-0 h-8">
               <a href={bookingUrl} target="_blank" rel="noopener noreferrer">
                 Book
@@ -131,11 +171,8 @@ function TrainCard({
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            { label: "Economy", count: economy },
-            { label: "1st Class", count: firstClass },
-          ].map(({ label, count }) => (
+        <div className={cn("grid gap-2", cols)}>
+          {seatClasses.map(({ label, count }) => (
             <div
               key={label}
               className={cn(
@@ -158,47 +195,22 @@ function TrainCard({
           ))}
         </div>
 
-        {fare && (
+        {fares.length > 0 && (
           <div className="mt-3 pt-3 border-t border-border/30 grid gap-1">
             <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">
               Fares (adult / child)
             </p>
-            {fare.economyAdult && (
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">Economy</span>
+            {fares.map((row) => (
+              <div key={row.label} className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">{row.label}</span>
                 <span className="font-medium tabular-nums">
-                  {fare.economyAdult}
+                  {row.adult}
                   <span className="text-muted-foreground/70 font-normal">
-                    {" "}
-                    / {fare.economyChild}
+                    {" "}/ {row.child}
                   </span>
                 </span>
               </div>
-            )}
-            {fare.firstAdult && (
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">1st Class</span>
-                <span className="font-medium tabular-nums">
-                  {fare.firstAdult}
-                  <span className="text-muted-foreground/70 font-normal">
-                    {" "}
-                    / {fare.firstChild}
-                  </span>
-                </span>
-              </div>
-            )}
-            {fare.premiumAdult && (
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">Premium</span>
-                <span className="font-medium tabular-nums">
-                  {fare.premiumAdult}
-                  <span className="text-muted-foreground/70 font-normal">
-                    {" "}
-                    / {fare.premiumChild}
-                  </span>
-                </span>
-              </div>
-            )}
+            ))}
           </div>
         )}
       </div>
@@ -235,12 +247,7 @@ export function DaySheet({ day, scheduleType, from, to, bookingUrl, onClose }: P
 
   const trains: TrainInfo[] = searchData?.results
     ? searchData.results.map(fromSearchResult)
-    : (day?.trains ?? []).map((t) => ({
-        trainNo: t.trainNo,
-        departure: t.departure,
-        economy: t.economy,
-        firstClass: t.firstClass,
-      }));
+    : (day?.trains ?? []).map(fromMonthTrain);
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={(o) => !o && onClose()}>
@@ -321,6 +328,16 @@ export function DaySheet({ day, scheduleType, from, to, bookingUrl, onClose }: P
                 <Loader2 className="size-6 animate-spin text-muted-foreground/40 mb-4" />
                 <p className="text-sm text-muted-foreground">Loading availability…</p>
               </div>
+            ) : trains.length === 0 && searchData?.fullyBooked ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <div className="w-12 h-12 rounded-2xl bg-destructive/10 flex items-center justify-center mb-4">
+                  <X className="size-5 text-destructive/60" />
+                </div>
+                <p className="font-semibold text-foreground">Fully Booked</p>
+                <p className="text-sm text-muted-foreground mt-1 max-w-[220px]">
+                  All trains on this date are sold out. Try another date.
+                </p>
+              </div>
             ) : trains.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="w-12 h-12 rounded-2xl bg-muted/60 flex items-center justify-center mb-4">
@@ -332,8 +349,8 @@ export function DaySheet({ day, scheduleType, from, to, bookingUrl, onClose }: P
                 </p>
               </div>
             ) : (
-              trains.map((train) => (
-                <TrainCard key={train.trainNo} {...train} bookingUrl={bookingUrl} />
+              trains.map((train, i) => (
+                <TrainCard key={train.trainNo || `train-${i}`} {...train} bookingUrl={bookingUrl} />
               ))
             )}
           </div>

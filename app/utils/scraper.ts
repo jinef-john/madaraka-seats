@@ -158,6 +158,27 @@ function extractHeading(fragment: string): string {
   return match ? decodeHtml(match[1].replace(/<[^>]+>/g, " ")) : "";
 }
 
+function to24h(time12: string): string {
+  const m = time12.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (!m) return time12;
+  let h = parseInt(m[1], 10);
+  if (m[3].toLowerCase() === "pm" && h !== 12) h += 12;
+  if (m[3].toLowerCase() === "am" && h === 12) h = 0;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+function extractVisibleTimes(fragment: string): {
+  departure: string;
+  arrival: string;
+} {
+  const dep = fragment.match(/Departure:\s*(\d{1,2}:\d{2}\s*[ap]m)/i);
+  const arr = fragment.match(/Arrival:\s*(\d{1,2}:\d{2}\s*[ap]m)/i);
+  return {
+    departure: dep ? to24h(dep[1]) : "",
+    arrival: arr ? to24h(arr[1]) : "",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // PHP serialization decoder
 // ---------------------------------------------------------------------------
@@ -244,6 +265,24 @@ function parsePremiumSeatBlob(encoded: string): PremiumSeatGroup[] {
 }
 
 // ---------------------------------------------------------------------------
+// "Fully Booked" / sold-out detection
+// ---------------------------------------------------------------------------
+
+function isSoldOut(html: string): boolean {
+  // Express/standard: explicit "Fully Booked" message
+  if (/fully\s+booked/i.test(html)) return true;
+  // Inter-county: waiting-list form appears when premium trains are sold out
+  if (/waiting-list-confirmed\.php/i.test(html)) return true;
+  return false;
+}
+
+function departureTimeFromSlot(label: string): string {
+  const m = label.match(/(\d{1,2})[.:]\s*(\d{2})\s*(am|pm)/i);
+  if (m) return to24h(`${m[1]}:${m[2]} ${m[3]}`);
+  return "";
+}
+
+// ---------------------------------------------------------------------------
 // Result parsers  (queriedDeparture/statusCode/protocol filled in later)
 // ---------------------------------------------------------------------------
 
@@ -260,6 +299,7 @@ function parseStandardResults(html: string): PartialStandard[] {
   return extractForms(html, "booking-details.php")
     .map((fragment): PartialStandard => {
       const f = extractInputs(fragment);
+      const visible = extractVisibleTimes(fragment);
       return {
         resultType: "standard",
         title: extractHeading(fragment),
@@ -267,8 +307,8 @@ function parseStandardResults(html: string): PartialStandard[] {
         trainNo: f.train || "",
         from: f.from || f.leaving_from || "",
         to: f.to || f.going_to || "",
-        departure: f.departure || "",
-        arrival: f.arrival || "",
+        departure: f.departure || visible.departure,
+        arrival: f.arrival || visible.arrival,
         fare: {
           economyAdult: f.ecoAdult || "",
           economyChild: f.ecoChild || "",
@@ -291,6 +331,7 @@ function parsePremiumResults(html: string): PartialPremium[] {
   return extractForms(html, "booking-details-premium.php")
     .map((fragment): PartialPremium => {
       const f = extractInputs(fragment);
+      const visible = extractVisibleTimes(fragment);
       return {
         resultType: "premium",
         title: extractHeading(fragment),
@@ -298,8 +339,8 @@ function parsePremiumResults(html: string): PartialPremium[] {
         trainNo: f.train || "",
         from: f.from || f.leaving_from || "",
         to: f.to || f.going_to || "",
-        departure: f.departure || "",
-        arrival: f.arrival || "",
+        departure: f.departure || visible.departure,
+        arrival: f.arrival || visible.arrival,
         coach: f.coach || "",
         fares: {
           premiumAdult: f.premiumAdult || "",
@@ -448,6 +489,7 @@ export interface RoutesData {
 
 export interface SearchData extends RoutesData {
   results: TrainSearchResult[];
+  fullyBooked?: boolean;
 }
 
 export interface SearchOptions {
@@ -539,6 +581,9 @@ export async function scrapeSearch(
           );
 
     const allResults: TrainSearchResult[] = [];
+    const soldOutSlots: string[] = [];
+    const fromLower = fromOption.label.toLowerCase();
+    const toLower = toOption.label.toLowerCase();
 
     for (const option of departuresToQuery) {
       const response = await submitSearch(session, home.csrfToken, {
@@ -549,12 +594,22 @@ export async function scrapeSearch(
         departure: option.value,
       });
 
-      const parsed =
-        options.schedule === "inter_county"
-          ? parsePremiumResults(response.text)
-          : parseStandardResults(response.text);
+      const parsed: (PartialStandard | PartialPremium)[] = [
+        ...parseStandardResults(response.text),
+        ...parsePremiumResults(response.text),
+      ];
 
-      for (const result of parsed) {
+      const matching = parsed.filter(
+        (r) =>
+          r.from.toLowerCase() === fromLower &&
+          r.to.toLowerCase() === toLower,
+      );
+
+      if (matching.length === 0 && options.schedule !== "phase2" && isSoldOut(response.text)) {
+        soldOutSlots.push(option.value);
+      }
+
+      for (const result of matching) {
         allResults.push({
           ...result,
           queriedDeparture: option.value || "<blank>",
@@ -571,7 +626,69 @@ export async function scrapeSearch(
         `${r.trainId}|${r.trainNo}|${r.departure}|${r.arrival}|${r.from}|${r.to}`,
     );
 
-    return { terminals, destinations, departures, results };
+    // Detect sold-out: at least one slot returned sold-out with no matching results
+    const fullyBooked = soldOutSlots.length > 0;
+
+    // For non-blank sold-out slots, create synthetic entries so the DaySheet
+    // shows them as "Sold Out" rather than hiding them entirely.
+    if (fullyBooked) {
+      const foundDepartures = new Set(
+        results.map((r) => {
+          const hhmm = r.departure.match(/(\d{2}):(\d{2})/);
+          return hhmm ? hhmm[0] : r.departure;
+        }),
+      );
+      for (const slot of soldOutSlots) {
+        if (!slot) continue; // skip blank
+        const depOpt = departuresToQuery.find((o) => o.value === slot);
+        const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
+        if (!dep || foundDepartures.has(dep)) continue;
+
+        if (options.schedule === "inter_county") {
+          results.push({
+            resultType: "premium",
+            title: "",
+            trainId: "",
+            trainNo: "",
+            from: fromOption.label,
+            to: toOption.label,
+            departure: dep,
+            arrival: "",
+            coach: "",
+            fares: { premiumAdult: "", premiumChild: "" },
+            seatGroups: [],
+            bookingEndpoint: "",
+            reviewEndpoint: "",
+            queriedDeparture: slot,
+            queriedDepartureLabel: depOpt?.label || slot,
+            statusCode: 200,
+            protocol: "",
+          } as PremiumTrainResult);
+        } else {
+          results.push({
+            resultType: "standard",
+            title: "",
+            trainId: "",
+            trainNo: "",
+            from: fromOption.label,
+            to: toOption.label,
+            departure: dep,
+            arrival: "",
+            fare: { economyAdult: "", economyChild: "", firstAdult: "", firstChild: "" },
+            openSeats: { economy: "0", firstClass: "0" },
+            coachOptions: [],
+            bookingEndpoint: "",
+            reviewEndpoint: "",
+            queriedDeparture: slot,
+            queriedDepartureLabel: depOpt?.label || slot,
+            statusCode: 200,
+            protocol: "",
+          } as StandardTrainResult);
+        }
+      }
+    }
+
+    return { terminals, destinations, departures, results, fullyBooked };
   } finally {
     session.close();
   }
@@ -582,6 +699,8 @@ export async function scrapeSearch(
 // ---------------------------------------------------------------------------
 
 function extractTime(datetime: string): string {
+  const ampm = datetime.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (ampm) return to24h(datetime);
   const match = datetime.match(/\d{2}:\d{2}/);
   return match ? match[0] : datetime;
 }
@@ -593,9 +712,9 @@ function toMonthDayTrain(result: TrainSearchResult): MonthDayTrain {
       departure: extractTime(result.departure),
       economy: parseInt(result.openSeats.economy, 10) || 0,
       firstClass: parseInt(result.openSeats.firstClass, 10) || 0,
+      premium: 0,
     };
   }
-  // inter_county: sum available seats across all coaches
   const total = result.seatGroups.reduce((sum, g) => {
     if (g.decodeError) return sum;
     const n =
@@ -607,8 +726,9 @@ function toMonthDayTrain(result: TrainSearchResult): MonthDayTrain {
   return {
     trainNo: result.trainNo,
     departure: extractTime(result.departure),
-    economy: total,
+    economy: 0,
     firstClass: 0,
+    premium: total,
   };
 }
 
@@ -623,11 +743,16 @@ async function scrapeDayWithSession(
     schedule: Schedule;
     fromId: string;
     toId: string;
+    fromLabel: string;
+    toLabel: string;
     date: string;
     departuresToQuery: SelectOption[];
   },
 ): Promise<MonthDay> {
   const dayResults: TrainSearchResult[] = [];
+  const soldOutSlots: string[] = [];
+  const fromLower = config.fromLabel.toLowerCase();
+  const toLower = config.toLabel.toLowerCase();
 
   for (const option of config.departuresToQuery) {
     try {
@@ -639,12 +764,22 @@ async function scrapeDayWithSession(
         departure: option.value,
       });
 
-      const parsed =
-        config.schedule === "inter_county"
-          ? parsePremiumResults(response.text)
-          : parseStandardResults(response.text);
+      const parsed: (PartialStandard | PartialPremium)[] = [
+        ...parseStandardResults(response.text),
+        ...parsePremiumResults(response.text),
+      ];
 
-      for (const result of parsed) {
+      const matching = parsed.filter(
+        (r) =>
+          r.from.toLowerCase() === fromLower &&
+          r.to.toLowerCase() === toLower,
+      );
+
+      if (matching.length === 0 && option.value && config.schedule !== "phase2" && isSoldOut(response.text)) {
+        soldOutSlots.push(option.value);
+      }
+
+      for (const result of matching) {
         dayResults.push({
           ...result,
           queriedDeparture: option.value || "<blank>",
@@ -662,6 +797,23 @@ async function scrapeDayWithSession(
     dayResults,
     (r) => `${r.trainId}|${r.trainNo}|${r.departure}`,
   ).map(toMonthDayTrain);
+
+  // For departure slots that returned "Fully Booked" with no parseable forms,
+  // add a synthetic sold-out entry so the calendar shows the train exists.
+  const foundDepartures = new Set(trains.map((t) => t.departure));
+  for (const slot of soldOutSlots) {
+    const depOpt = config.departuresToQuery.find((o) => o.value === slot);
+    const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
+    if (dep && !foundDepartures.has(dep)) {
+      trains.push({
+        trainNo: "",
+        departure: dep,
+        economy: 0,
+        firstClass: 0,
+        premium: 0,
+      });
+    }
+  }
 
   return { date: config.date, trains };
 }
@@ -694,6 +846,8 @@ export async function scrapeMonthStreaming(
   // list of departure slots. Single CSRF request — cheap.
   let fromId: string;
   let toId: string;
+  let fromLabel: string;
+  let toLabel: string;
   let departuresToQuery: SelectOption[];
 
   {
@@ -704,9 +858,7 @@ export async function scrapeMonthStreaming(
 
       const departures = extractNamedSelectOptions(
         home.html,
-        schedule === "inter_county"
-          ? "premium_depature_time"
-          : "depature_time",
+        schedule === "inter_county" ? "premium_depature_time" : "depature_time",
       );
 
       const fromOption = findOption(terminals, from);
@@ -730,10 +882,12 @@ export async function scrapeMonthStreaming(
 
       fromId = fromOption.value;
       toId = toOption.value;
-      departuresToQuery =
-        departures.length > 0
-          ? departures
-          : [{ value: "", label: "<blank>" }];
+      fromLabel = fromOption.label;
+      toLabel = toOption.label;
+      departuresToQuery = uniqueBy(
+        [{ value: "", label: "<blank>" }, ...departures],
+        (o) => o.value,
+      );
     } finally {
       setup.close();
     }
@@ -770,6 +924,8 @@ export async function scrapeMonthStreaming(
               schedule,
               fromId,
               toId,
+              fromLabel,
+              toLabel,
               date,
               departuresToQuery,
             });
@@ -807,4 +963,3 @@ export async function scrapeMonth(
   );
   return days.sort((a, b) => a.date.localeCompare(b.date));
 }
-

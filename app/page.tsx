@@ -35,7 +35,7 @@ const MONTH_NAMES = [
 const LEGEND = [
   { label: "Available", bar: "bg-amber-container" },
   { label: "Filling",   bar: "bg-primary/70" },
-  { label: "Sold Out",  bar: "bg-muted-foreground/30" },
+  { label: "Sold Out",  bar: "bg-destructive/40" },
 ] as const;
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
