@@ -68,6 +68,8 @@ interface Props {
   loading: boolean;
   selectedDate: string | null;
   onDayClick: (date: string) => void;
+  /** Last bookable date (YYYY-MM-DD). Days after this are greyed out. */
+  lastBookable?: string;
 }
 
 export function MonthCalendar({
@@ -77,6 +79,7 @@ export function MonthCalendar({
   loading,
   selectedDate,
   onDayClick,
+  lastBookable,
 }: Props) {
   const dayMap = new Map<string, MonthDay>();
   days?.forEach((d) => dayMap.set(d.date, d));
@@ -127,6 +130,8 @@ export function MonthCalendar({
           const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
           const stored = dayMap.get(dateStr);
           const isPast = dateStr < todayStr;
+          const isBeyondHorizon = lastBookable ? dateStr > lastBookable : false;
+          const isDisabled = isPast || isBeyondHorizon;
           const isToday = dateStr === todayStr;
           const isSelected = dateStr === selectedDate;
           const status = stored ? getStatus(stored) : "none";
@@ -135,10 +140,10 @@ export function MonthCalendar({
           return (
             <button
               key={key}
-              onClick={() => !isPast && onDayClick(dateStr)}
-              disabled={isPast}
+              onClick={() => !isDisabled && onDayClick(dateStr)}
+              disabled={isDisabled}
               title={
-                !isPast && stored
+                !isDisabled && stored
                   ? status === "sold-out"
                     ? "Sold out"
                     : `${seats.toLocaleString()} seats available`
@@ -150,9 +155,9 @@ export function MonthCalendar({
                 "h-14 sm:h-16 rounded-xl",
                 "transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 // past days
-                isPast ? "cursor-default opacity-20" : "cursor-pointer",
+                isDisabled ? "cursor-default opacity-20" : "cursor-pointer",
                 // availability tint (only when not selected)
-                !isPast && !isSelected && TINT[status],
+                !isDisabled && !isSelected && TINT[status],
                 // today ring
                 isToday && !isSelected && "ring-1 ring-primary/50",
                 // selected — solid primary fill, no scale to avoid overflow
@@ -175,7 +180,7 @@ export function MonthCalendar({
               </span>
 
               {/* Seat-count hint — shown when data is present and cell isn't selected */}
-              {!isPast && !isSelected && status !== "none" && (
+              {!isDisabled && !isSelected && status !== "none" && (
                 <span
                   className={cn(
                     "text-[10px] leading-none font-semibold mt-1 tabular-nums",
@@ -191,7 +196,7 @@ export function MonthCalendar({
               )}
 
               {/* Status bar — thin line at the bottom edge */}
-              {!isPast && (
+              {!isDisabled && (
                 <span
                   className={cn(
                     "absolute bottom-1.5 left-1/2 -translate-x-1/2",

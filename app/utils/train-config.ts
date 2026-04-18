@@ -30,6 +30,7 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
       { value: "3.00", label: "3.00 pm" },
       { value: "10.00", label: "10.00 pm" },
     ],
+    bookingHorizonDays: 60,
   },
   inter_county: {
     type: "inter_county",
@@ -66,6 +67,7 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
       { value: "3:00 PM", label: "3.00 pm" },
       { value: "10:00 PM", label: "10.00 pm" },
     ],
+    bookingHorizonDays: 60,
   },
   phase2: {
     type: "phase2",
@@ -91,10 +93,19 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
       "Suswa",
     ]),
     departureOptions: [],
+    bookingHorizonDays: 30,
   },
 };
 
 export const TRAIN_TYPES = Object.values(TRAIN_TYPE_CONFIG);
+
+/** Returns the last bookable date (YYYY-MM-DD) for a given train type. */
+export function lastBookableDate(type: TrainType): string {
+  const horizon = TRAIN_TYPE_CONFIG[type].bookingHorizonDays;
+  const d = new Date();
+  d.setDate(d.getDate() + horizon - 1);
+  return d.toISOString().slice(0, 10);
+}
 
 export const FRONTEND_HARDCODE_GUIDANCE = {
   safeToHardcode: [

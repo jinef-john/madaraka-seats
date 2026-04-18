@@ -16,6 +16,8 @@ export interface TrainTypeConfig {
   stationCatalog: string[];
   knownDestinationsByOrigin: Record<string, string[]>;
   departureOptions: SelectOption[];
+  /** How far ahead (in days from today) the site allows bookings */
+  bookingHorizonDays: number;
 }
 
 export interface SearchQuery {
