@@ -423,6 +423,25 @@ async function loadTerminals(
   return { basePath, terminals: extractOptions(html) };
 }
 
+/** Resolve terminals/destinations from the OTHER endpoint family (for dual-endpoint scraping). */
+async function loadTerminalsAlt(
+  session: Session,
+  schedule: Schedule,
+): Promise<{ basePath: string; terminals: SelectOption[] }> {
+  // Opposite of loadTerminals: express uses fetch-premium.php, inter_county uses fetch.php
+  const basePath =
+    schedule === "inter_county" ? "/fetch.php" : "/fetch-premium.php";
+  const html = (
+    await session.get(
+      buildFetchUrl(basePath, {
+        type: "terminals",
+        schedule_type: schedule,
+      }),
+    )
+  ).text;
+  return { basePath, terminals: extractOptions(html) };
+}
+
 async function loadDestinations(
   session: Session,
   basePath: string,
@@ -473,6 +492,55 @@ async function submitSearch(
       destination_id: config.toId,
       "travel-date": formatDateForSite(config.date),
       depature_time: config.departure,
+    },
+  });
+}
+
+/** Submit a search to the STANDARD endpoint (/search-view-results.php). */
+async function submitStandardSearch(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    date: string;
+    departure: string;
+  },
+) {
+  return session.post(`${METICKETS_BASE_URL}${STANDARD_SEARCH_PATH}`, {
+    data: {
+      csrf_token: csrfToken,
+      schedule_type: config.schedule,
+      terminal_id: config.fromId,
+      destination_id: config.toId,
+      "travel-date": formatDateForSite(config.date),
+      depature_time: config.departure,
+    },
+  });
+}
+
+/** Submit a search to the PREMIUM endpoint (/search-view-results-return.php). */
+async function submitPremiumSearch(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    date: string;
+    departure: string;
+  },
+) {
+  return session.post(`${METICKETS_BASE_URL}${PREMIUM_SEARCH_PATH}`, {
+    data: {
+      csrf_token: csrfToken,
+      trip_type: "one_way",
+      premium_train_type: config.schedule,
+      premium_terminal_id: config.fromId,
+      premium_destination_id: config.toId,
+      premium_travel_date: formatDateForSite(config.date),
+      premium_depature_time: config.departure,
     },
   });
 }
@@ -572,6 +640,38 @@ export async function scrapeSearch(
       );
     }
 
+    // Resolve alternate endpoint IDs for dual-endpoint scraping
+    let altFromId: string | undefined;
+    let altToId: string | undefined;
+    let altDepartures: SelectOption[] | undefined;
+    if (hasPremiumCoach(options.schedule)) {
+      try {
+        const { basePath: altBasePath, terminals: altTerminals } =
+          await loadTerminalsAlt(session, options.schedule);
+        const altFrom = findOption(altTerminals, options.from);
+        if (altFrom) {
+          const altDests = await loadDestinations(
+            session,
+            altBasePath,
+            options.schedule,
+            altFrom.value,
+          );
+          const altTo = findOption(altDests, options.to);
+          if (altTo) {
+            altFromId = altFrom.value;
+            altToId = altTo.value;
+            const altDepName =
+              options.schedule === "inter_county"
+                ? "depature_time"
+                : "premium_depature_time";
+            altDepartures = extractNamedSelectOptions(home.html, altDepName);
+          }
+        }
+      } catch {
+        // Proceed with primary only
+      }
+    }
+
     const departuresToQuery =
       options.departure && !options.allTrains
         ? [{ value: options.departure, label: options.departure }]
@@ -585,6 +685,7 @@ export async function scrapeSearch(
     const fromLower = fromOption.label.toLowerCase();
     const toLower = toOption.label.toLowerCase();
 
+    // --- Primary endpoint ---
     for (const option of departuresToQuery) {
       const response = await submitSearch(session, home.csrfToken, {
         schedule: options.schedule,
@@ -623,10 +724,60 @@ export async function scrapeSearch(
       }
     }
 
+    // --- Alternate endpoint (dual-endpoint for express/inter_county) ---
+    if (altFromId && altToId && altDepartures) {
+      const altSubmit =
+        options.schedule === "inter_county"
+          ? submitStandardSearch
+          : submitPremiumSearch;
+      const altDepsToQuery =
+        options.departure && !options.allTrains
+          ? [{ value: options.departure, label: options.departure }]
+          : uniqueBy(
+              [{ value: "", label: "<blank>" }, ...altDepartures],
+              (o) => o.value,
+            );
+
+      for (const option of altDepsToQuery) {
+        try {
+          const response = await altSubmit(session, home.csrfToken, {
+            schedule: options.schedule,
+            fromId: altFromId,
+            toId: altToId,
+            date: options.date,
+            departure: option.value,
+          });
+
+          const parsed: (PartialStandard | PartialPremium)[] =
+            options.schedule === "inter_county"
+              ? parseStandardResults(response.text)
+              : parsePremiumResults(response.text);
+
+          const matching = parsed.filter(
+            (r) =>
+              r.from.toLowerCase() === fromLower &&
+              r.to.toLowerCase() === toLower,
+          );
+
+          for (const result of matching) {
+            allResults.push({
+              ...result,
+              queriedDeparture: option.value || "<blank>",
+              queriedDepartureLabel: option.label || option.value || "<blank>",
+              statusCode: response.statusCode,
+              protocol: response.protocol,
+            } as TrainSearchResult);
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+    }
+
     const results = uniqueBy(
       allResults,
       (r) =>
-        `${r.trainId}|${r.trainNo}|${r.departure}|${r.arrival}|${r.from}|${r.to}`,
+        `${r.resultType}|${r.trainId}|${r.trainNo}|${r.departure}|${r.arrival}|${r.from}|${r.to}`,
     );
 
     // Detect sold-out: at least one slot returned sold-out with no matching results
@@ -720,6 +871,34 @@ function toMonthDayTrain(result: TrainSearchResult): MonthDayTrain {
   };
 }
 
+/**
+ * Merge standard and premium MonthDayTrain entries by departure hour.
+ * Same physical train has different trainNo on each endpoint (e.g. E2 vs E12),
+ * so we match by HH:MM departure time.
+ */
+function mergeTrains(trains: MonthDayTrain[]): MonthDayTrain[] {
+  const byDep = new Map<string, MonthDayTrain>();
+  for (const t of trains) {
+    const existing = byDep.get(t.departure);
+    if (existing) {
+      // Merge: pick the trainNo from standard (more recognizable) and
+      // combine seat counts.
+      existing.economy = existing.economy || t.economy;
+      existing.firstClass = existing.firstClass || t.firstClass;
+      existing.premium = existing.premium || t.premium;
+      if (!existing.trainNo) existing.trainNo = t.trainNo;
+    } else {
+      byDep.set(t.departure, { ...t });
+    }
+  }
+  return [...byDep.values()];
+}
+
+/** Whether a schedule type uses dual endpoints (standard + premium). */
+function hasPremiumCoach(schedule: Schedule): boolean {
+  return schedule === "express" || schedule === "inter_county";
+}
+
 // Scrape a single day using an already-established session and CSRF token.
 // Departure queries run sequentially within the session to stay friendly to
 // PHP's per-session file lock (concurrent requests sharing the same
@@ -735,6 +914,10 @@ async function scrapeDayWithSession(
     toLabel: string;
     date: string;
     departuresToQuery: SelectOption[];
+    // Alternate endpoint IDs (for dual standard+premium scraping)
+    altFromId?: string;
+    altToId?: string;
+    altDeparturesToQuery?: SelectOption[];
   },
 ): Promise<MonthDay> {
   const dayResults: TrainSearchResult[] = [];
@@ -742,6 +925,7 @@ async function scrapeDayWithSession(
   const fromLower = config.fromLabel.toLowerCase();
   const toLower = config.toLabel.toLowerCase();
 
+  // --- Primary endpoint queries ---
   for (const option of config.departuresToQuery) {
     try {
       const response = await submitSearch(session, csrfToken, {
@@ -785,10 +969,63 @@ async function scrapeDayWithSession(
     }
   }
 
-  const trains = uniqueBy(
+  // --- Alternate endpoint queries (dual-endpoint for express/inter_county) ---
+  if (config.altFromId && config.altToId && config.altDeparturesToQuery) {
+    // Determine which function to call based on schedule:
+    // inter_county primary=premium, alt=standard
+    // express primary=standard, alt=premium
+    const altSubmit =
+      config.schedule === "inter_county"
+        ? submitStandardSearch
+        : submitPremiumSearch;
+    const altDepartures = config.altDeparturesToQuery;
+
+    for (const option of altDepartures) {
+      try {
+        const response = await altSubmit(session, csrfToken, {
+          schedule: config.schedule,
+          fromId: config.altFromId,
+          toId: config.altToId,
+          date: config.date,
+          departure: option.value,
+        });
+
+        // Parse only the relevant result type from this endpoint
+        const parsed: (PartialStandard | PartialPremium)[] =
+          config.schedule === "inter_county"
+            ? parseStandardResults(response.text)
+            : parsePremiumResults(response.text);
+
+        const matching = parsed.filter(
+          (r) =>
+            r.from.toLowerCase() === fromLower &&
+            r.to.toLowerCase() === toLower,
+        );
+
+        for (const result of matching) {
+          dayResults.push({
+            ...result,
+            queriedDeparture: option.value || "<blank>",
+            queriedDepartureLabel: option.label || option.value || "<blank>",
+            statusCode: response.statusCode,
+            protocol: response.protocol,
+          } as TrainSearchResult);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  const rawTrains = uniqueBy(
     dayResults,
-    (r) => `${r.trainId}|${r.trainNo}|${r.departure}`,
+    (r) => `${r.resultType}|${r.trainId}|${r.trainNo}|${r.departure}`,
   ).map(toMonthDayTrain);
+
+  // Merge standard + premium entries for the same departure time
+  const trains = hasPremiumCoach(config.schedule)
+    ? mergeTrains(rawTrains)
+    : rawTrains;
 
   const fullyBooked = soldOutSlots.length > 0;
 
@@ -846,6 +1083,10 @@ export async function scrapeMonthStreaming(
   let fromLabel: string;
   let toLabel: string;
   let departuresToQuery: SelectOption[];
+  // Alt endpoint IDs for dual-endpoint scraping (express/inter_county)
+  let altFromId: string | undefined;
+  let altToId: string | undefined;
+  let altDeparturesToQuery: SelectOption[] | undefined;
 
   {
     const setup = createSession();
@@ -885,6 +1126,41 @@ export async function scrapeMonthStreaming(
         [{ value: "", label: "<blank>" }, ...departures],
         (o) => o.value,
       );
+
+      // Resolve alternate endpoint IDs for dual-endpoint scraping
+      if (hasPremiumCoach(schedule)) {
+        try {
+          const { basePath: altBasePath, terminals: altTerminals } =
+            await loadTerminalsAlt(setup, schedule);
+
+          const altFromOption = findOption(altTerminals, from);
+          if (altFromOption) {
+            const altDestinations = await loadDestinations(
+              setup,
+              altBasePath,
+              schedule,
+              altFromOption.value,
+            );
+            const altToOption = findOption(altDestinations, to);
+            if (altToOption) {
+              altFromId = altFromOption.value;
+              altToId = altToOption.value;
+              // The alt endpoint may use a different departure option set
+              const altDepName =
+                schedule === "inter_county"
+                  ? "depature_time"
+                  : "premium_depature_time";
+              const altDeps = extractNamedSelectOptions(home.html, altDepName);
+              altDeparturesToQuery = uniqueBy(
+                [{ value: "", label: "<blank>" }, ...altDeps],
+                (o) => o.value,
+              );
+            }
+          }
+        } catch {
+          // If alt resolution fails, proceed with primary only
+        }
+      }
     } finally {
       setup.close();
     }
@@ -926,6 +1202,9 @@ export async function scrapeMonthStreaming(
               toLabel,
               date,
               departuresToQuery,
+              altFromId,
+              altToId,
+              altDeparturesToQuery,
             });
             onDay(day);
           } catch {
