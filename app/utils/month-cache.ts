@@ -1,9 +1,11 @@
 import type { MonthDay, TrainType } from "@/types/train";
 import { redis } from "@/utils/redis";
 
-const TTL = Math.ceil(
-  parseInt(process.env.CACHE_REFRESH_INTERVAL_MS ?? "300000", 10) / 1000,
+const REFRESH_MS = parseInt(
+  process.env.CACHE_REFRESH_INTERVAL_MS ?? "300000",
+  10,
 );
+const TTL = Math.ceil((REFRESH_MS * 3) / 1000);
 
 function key(
   t: TrainType,

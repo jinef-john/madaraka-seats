@@ -1053,11 +1053,6 @@ async function scrapeDayWithSession(
 }
 
 // How many parallel PHP sessions to open for a month scrape.
-// Each session gets its own PHPSESSID so PHP does not serialise requests
-// across workers via its session file lock.
-// NOTE: do NOT use httpcloak fork() here — fork() shares the cookie jar, so
-// all forked tabs end up with the same PHPSESSID and PHP serialises them.
-// Configurable via SCRAPER_CONCURRENCY in .env.local.
 const MONTH_CONCURRENCY = parseInt(process.env.SCRAPER_CONCURRENCY ?? "20", 10);
 
 /**
@@ -1076,8 +1071,6 @@ export async function scrapeMonthStreaming(
   onDay: (day: MonthDay) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  // Phase 1: one setup session to resolve terminal / destination IDs and the
-  // list of departure slots. Single CSRF request — cheap.
   let fromId: string;
   let toId: string;
   let fromLabel: string;
@@ -1145,7 +1138,6 @@ export async function scrapeMonthStreaming(
             if (altToOption) {
               altFromId = altFromOption.value;
               altToId = altToOption.value;
-              // The alt endpoint may use a different departure option set
               const altDepName =
                 schedule === "inter_county"
                   ? "depature_time"
@@ -1211,9 +1203,7 @@ export async function scrapeMonthStreaming(
             // Emit an empty day rather than aborting the whole stream.
             onDay({ date, trains: [] });
           }
-          // Simulate browser page refresh: closes TCP/QUIC connections but
-          // keeps TLS session cache so the next day's requests look like a
-          // returning visitor (0-RTT resumption).
+
           worker.refresh();
         }
       } finally {
