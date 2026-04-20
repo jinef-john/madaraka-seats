@@ -3,7 +3,15 @@ import { scrapeMonth } from "@/utils/scraper";
 import { setMonth } from "@/utils/month-cache";
 import type { TrainType } from "@/types/train";
 
-const BATCH_SIZE = 6;
+const CONCURRENCY = 6;
+
+export interface WarmJob {
+  scheduleType: TrainType;
+  from: string;
+  to: string;
+  year: number;
+  month: number;
+}
 
 /** Returns list of {year, month} pairs from now up to and including the month containing `lastDate`. */
 function monthsInRange(lastDate: string): { year: number; month: number }[] {
@@ -23,62 +31,36 @@ function monthsInRange(lastDate: string): { year: number; month: number }[] {
   return result;
 }
 
-async function warmOne(r: {
-  scheduleType: TrainType;
-  from: string;
-  to: string;
-  year: number;
-  month: number;
-}) {
+async function warmOne(r: WarmJob) {
   try {
-    const days = await scrapeMonth(
-      r.scheduleType,
-      r.from,
-      r.to,
-      r.year,
-      r.month,
-    );
+    const days = await scrapeMonth(r.scheduleType, r.from, r.to, r.year, r.month);
     await setMonth(r.scheduleType, r.from, r.to, r.year, r.month, days);
   } catch {
     // retain previous data on error
   }
 }
 
-async function warmRoutes(
-  routes: {
-    scheduleType: TrainType;
-    from: string;
-    to: string;
-    year: number;
-    month: number;
-  }[],
-) {
-  for (let i = 0; i < routes.length; i += BATCH_SIZE) {
-    const batch = routes.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map(warmOne));
-  }
-}
-
-export async function refresh() {
-  // Warm ALL route pairs for every month within each type's booking horizon.
-  const jobs: {
-    scheduleType: TrainType;
-    from: string;
-    to: string;
-    year: number;
-    month: number;
-  }[] = [];
+/** Build the full list of route-months that need warming. */
+export function buildJobs(): WarmJob[] {
+  const jobs: WarmJob[] = [];
   for (const cfg of Object.values(TRAIN_TYPE_CONFIG)) {
     const months = monthsInRange(lastBookableDate(cfg.type));
     const pairs = Object.entries(cfg.knownDestinationsByOrigin);
     for (const { year, month } of months) {
       for (const [from, destinations] of pairs) {
         for (const to of destinations) {
-          jobs.push({ scheduleType: cfg.type, from, to, year, month });
+          jobs.push({ scheduleType: cfg.type as TrainType, from, to, year, month });
         }
       }
     }
   }
-  console.log(`[refresh] warming ${jobs.length} route-months`);
-  await warmRoutes(jobs);
+  return jobs;
+}
+
+/** Scrape and cache a chunk of route-months (designed to run within a single function invocation). */
+export async function warmChunk(jobs: WarmJob[]) {
+  for (let i = 0; i < jobs.length; i += CONCURRENCY) {
+    const batch = jobs.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(warmOne));
+  }
 }
