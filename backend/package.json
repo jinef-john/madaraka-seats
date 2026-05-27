@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tsx watch --env-file=.env src/index.ts",
     "start": "tsx --env-file=.env src/index.ts",
+    "start:docker": "tsx src/index.ts",
     "build": "tsc",
     "start:prod": "node dist/index.js"
   },
@@ -14,7 +15,8 @@
     "express": "^4.21.2",
     "httpcloak": "^1.6.1",
     "node-cron": "^3.0.3",
-    "pg": "^8.13.3"
+    "pg": "^8.13.3",
+    "tsx": "^4.19.4"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -22,7 +24,6 @@
     "@types/node": "^20",
     "@types/node-cron": "^3.0.11",
     "@types/pg": "^8.11.11",
-    "tsx": "^4.19.4",
     "typescript": "^5"
   }
 }

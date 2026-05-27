@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: metickets
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/metickets
+      DATABASE_SSL: "false"
+      PORT: "4000"
+      REFRESH_CRON: "*/5 * * * *"
+      SCRAPER_CONCURRENCY: "20"
+      SCRAPER_TIMEOUT: "30"
+      SCRAPER_RETRY: "2"
+      CACHE_SEARCH_TTL_MS: "30000"
+      ALLOWED_ORIGINS: "*"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
