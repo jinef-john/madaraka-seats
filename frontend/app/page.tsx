@@ -146,7 +146,7 @@ function CalendarPage() {
         year: String(year),
         month: String(month),
       });
-      const res = await fetch(`/api/trains/month?${params}`, { signal });
+      const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/api/trains/month?${params}`, { signal });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);

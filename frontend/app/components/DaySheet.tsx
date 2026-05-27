@@ -354,7 +354,7 @@ export function DaySheet({
           to,
           date: day!.date,
         });
-        const res = await fetch(`/api/trains/search?${params}`, { signal });
+        const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/api/trains/search?${params}`, { signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       },
