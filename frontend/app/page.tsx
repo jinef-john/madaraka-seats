@@ -7,9 +7,9 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
-  Train,
   ArrowDown,
 } from "lucide-react";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -226,9 +226,13 @@ function CalendarPage() {
 
   const Brand = () => (
     <div className="flex items-center gap-2.5">
-      <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center shrink-0">
-        <Train className="size-[14px] text-white" />
-      </div>
+      <Image
+        src="/seat-logo.png"
+        alt="KRC logo"
+        width={28}
+        height={28}
+        className="rounded-lg shrink-0"
+      />
       <div className="leading-none">
         <p className="text-sm font-bold text-primary">KRC Availability</p>
         <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
@@ -336,10 +340,10 @@ function CalendarPage() {
               href="https://github.com/jinef-john/madaraka-seats"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors mt-2"
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mt-2"
             >
               <svg
-                className="size-3.5"
+                className="size-4"
                 viewBox="0 0 16 16"
                 fill="currentColor"
                 aria-hidden="true"
@@ -459,7 +463,7 @@ function CalendarPage() {
               title="Source on GitHub"
             >
               <svg
-                className="size-4"
+                className="size-4.5"
                 viewBox="0 0 16 16"
                 fill="currentColor"
                 aria-hidden="true"
