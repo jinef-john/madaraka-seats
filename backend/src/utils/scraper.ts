@@ -1,0 +1,1232 @@
+import { Session } from "httpcloak";
+
+import type {
+  MonthDay,
+  MonthDayTrain,
+  PremiumSeatGroup,
+  PremiumTrainResult,
+  SelectOption,
+  StandardTrainResult,
+  TrainSearchResult,
+} from "../types/train.js";
+import { METICKETS_BASE_URL, lastBookableDate } from "./train-config.js";
+
+// ---------------------------------------------------------------------------
+// Upstream path constants
+// ---------------------------------------------------------------------------
+
+const STANDARD_SEARCH_PATH = "/search-view-results.php";
+const PREMIUM_SEARCH_PATH = "/search-view-results-return.php";
+const STANDARD_BOOKING_PATH = "/booking-details.php";
+const PREMIUM_BOOKING_PATH = "/booking-details-premium.php";
+const STANDARD_REVIEW_PATH = "/review-and-pay.php";
+const PREMIUM_REVIEW_PATH = "/review-and-pay-premium.php";
+
+// ---------------------------------------------------------------------------
+// String / HTML helpers
+// ---------------------------------------------------------------------------
+
+function normalizeSpace(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function decodeHtml(value: string): string {
+  return normalizeSpace(value)
+    .replace(/&amp;/g, "&")
+    .replace(/&#039;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#x2F;/g, "/");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function formatDateForSite(dateValue: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+    throw new Error(`Invalid date '${dateValue}'. Expected YYYY-MM-DD.`);
+  }
+  const [year, month, day] = dateValue.split("-");
+  return `${month}/${day}/${year}`;
+}
+
+function buildFetchUrl(path: string, params: Record<string, string>): string {
+  const url = new URL(path, METICKETS_BASE_URL);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== "") url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+// ---------------------------------------------------------------------------
+// HTML parsing
+// ---------------------------------------------------------------------------
+
+export function extractCsrf(html: string): string | null {
+  const match = html.match(
+    /name=["']csrf_token["'][^>]*value=["']([^"']+)["']/i,
+  );
+  return match ? match[1] : null;
+}
+
+export function extractOptions(html: string): SelectOption[] {
+  return [
+    ...html.matchAll(
+      /<option[^>]*value=['"]?([^'">]*)['"]?[^>]*>([\s\S]*?)<\/option>/gi,
+    ),
+  ]
+    .map(([, value, label]) => ({
+      value: decodeHtml(value),
+      label: decodeHtml(label.replace(/<[^>]+>/g, " ")),
+    }))
+    .filter((o) => o.value && o.label && o.label.toLowerCase() !== "select...");
+}
+
+export function extractNamedSelectOptions(
+  html: string,
+  selectName: string,
+): SelectOption[] {
+  const pattern = new RegExp(
+    `<select[^>]+name=["']${escapeRegExp(selectName)}["'][^>]*>([\\s\\S]*?)<\\/select>`,
+    "i",
+  );
+  const match = html.match(pattern);
+  return match ? extractOptions(match[1]) : [];
+}
+
+export function findOption(
+  options: SelectOption[],
+  target: string,
+): SelectOption | null {
+  const want = normalizeSpace(target).toLowerCase();
+  return (
+    options.find((o) => o.label.toLowerCase() === want) ??
+    options.find((o) => o.value.toLowerCase() === want) ??
+    options.find((o) => o.label.toLowerCase().includes(want)) ??
+    null
+  );
+}
+
+function extractForms(html: string, actionName: string): string[] {
+  const pattern = new RegExp(
+    `<form[^>]+action=["'][^"']*${escapeRegExp(actionName)}[^"']*["'][^>]*>([\\s\\S]*?)<\\/form>`,
+    "gi",
+  );
+  return [...html.matchAll(pattern)].map((m) => m[1]);
+}
+
+function extractInputs(fragment: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const m of fragment.matchAll(
+    /<input[^>]+name=["']([^"']+)["'][^>]*>/gi,
+  )) {
+    const valueMatch = m[0].match(/value=["']([^"']*)["']/i);
+    fields[m[1]] = decodeHtml(valueMatch ? valueMatch[1] : "");
+  }
+  return fields;
+}
+
+function extractSelectOptions(
+  fragment: string,
+  selectName: string,
+): SelectOption[] {
+  const pattern = new RegExp(
+    `<select[^>]+name=["']${escapeRegExp(selectName)}["'][^>]*>([\\s\\S]*?)<\\/select>`,
+    "i",
+  );
+  const match = fragment.match(pattern);
+  if (!match) return [];
+  return [
+    ...match[1].matchAll(
+      /<option[^>]*value=["']([^"']*)["'][^>]*>([\s\S]*?)<\/option>/gi,
+    ),
+  ]
+    .map(([, value, label]) => ({
+      value: decodeHtml(value),
+      label: decodeHtml(label.replace(/<[^>]+>/g, " ")),
+    }))
+    .filter((o) => o.value && o.label);
+}
+
+function extractHeading(fragment: string): string {
+  const match = fragment.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+  return match ? decodeHtml(match[1].replace(/<[^>]+>/g, " ")) : "";
+}
+
+function to24h(time12: string): string {
+  const m = time12.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (!m) return time12;
+  let h = parseInt(m[1], 10);
+  if (m[3].toLowerCase() === "pm" && h !== 12) h += 12;
+  if (m[3].toLowerCase() === "am" && h === 12) h = 0;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+function extractVisibleTimes(fragment: string): {
+  departure: string;
+  arrival: string;
+} {
+  const dep = fragment.match(/Departure:\s*(\d{1,2}:\d{2}\s*[ap]m)/i);
+  const arr = fragment.match(/Arrival:\s*(\d{1,2}:\d{2}\s*[ap]m)/i);
+  return {
+    departure: dep ? to24h(dep[1]) : "",
+    arrival: arr ? to24h(arr[1]) : "",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PHP serialization decoder
+// ---------------------------------------------------------------------------
+
+function parsePhpSerialized(input: string): unknown {
+  let offset = 0;
+
+  function readUntil(char: string): string {
+    const end = input.indexOf(char, offset);
+    if (end === -1)
+      throw new Error(`Unterminated token while looking for '${char}'`);
+    const value = input.slice(offset, end);
+    offset = end + 1;
+    return value;
+  }
+
+  function readValue(): unknown {
+    const type = input[offset];
+    offset += 2;
+
+    if (type === "N") return null;
+    if (type === "i") return Number.parseInt(readUntil(";"), 10);
+    if (type === "d") return Number.parseFloat(readUntil(";"));
+    if (type === "b") return readUntil(";") === "1";
+
+    if (type === "s") {
+      const length = Number.parseInt(readUntil(":"), 10);
+      if (input[offset] !== '"')
+        throw new Error("Invalid serialized string start");
+      offset += 1;
+      const value = input.slice(offset, offset + length);
+      offset += length;
+      if (input[offset] !== '"' || input[offset + 1] !== ";")
+        throw new Error("Invalid serialized string end");
+      offset += 2;
+      return value;
+    }
+
+    if (type === "a") {
+      const count = Number.parseInt(readUntil(":"), 10);
+      if (input[offset] !== "{")
+        throw new Error("Invalid serialized array start");
+      offset += 1;
+      const entries: [unknown, unknown][] = [];
+      for (let i = 0; i < count; i++) {
+        entries.push([readValue(), readValue()]);
+      }
+      if (input[offset] !== "}")
+        throw new Error("Invalid serialized array end");
+      offset += 1;
+      const isDense = entries.every(([k], i) => Number(k) === i);
+      if (isDense) return entries.map(([, v]) => v);
+      return Object.fromEntries(entries as [string, unknown][]);
+    }
+
+    throw new Error(`Unsupported PHP serialized type '${type}'`);
+  }
+
+  return readValue();
+}
+
+function parsePremiumSeatBlob(encoded: string): PremiumSeatGroup[] {
+  if (!encoded) return [];
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    const parsed = parsePhpSerialized(decoded);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as Record<string, unknown>[]).map((coach) => ({
+      id: coach.id as string | number | undefined,
+      name: coach.name as string | undefined,
+      availableSeats: coach.available_seats as string | number | undefined,
+      seats: Array.isArray(coach.seats)
+        ? (coach.seats as string[])
+        : Object.values((coach.seats as Record<string, string>) ?? {}),
+      bookedSeats: Array.isArray(coach.booked_seats)
+        ? (coach.booked_seats as string[])
+        : Object.values((coach.booked_seats as Record<string, string>) ?? {}),
+    }));
+  } catch (error) {
+    return [
+      { decodeError: (error as Error).message, seats: [], bookedSeats: [] },
+    ];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// "Fully Booked" / sold-out detection
+// ---------------------------------------------------------------------------
+
+function isSoldOut(html: string): boolean {
+  // Express/standard: explicit "Fully Booked" message
+  if (/fully\s+booked/i.test(html)) return true;
+  // Inter-county: waiting-list form appears when premium trains are sold out
+  if (/waiting-list-confirmed\.php/i.test(html)) return true;
+  return false;
+}
+
+function departureTimeFromSlot(label: string): string {
+  const m = label.match(/(\d{1,2})[.:]\s*(\d{2})\s*(am|pm)/i);
+  if (m) return to24h(`${m[1]}:${m[2]} ${m[3]}`);
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Result parsers  (queriedDeparture/statusCode/protocol filled in later)
+// ---------------------------------------------------------------------------
+
+type PartialStandard = Omit<
+  StandardTrainResult,
+  "queriedDeparture" | "queriedDepartureLabel" | "statusCode" | "protocol"
+>;
+type PartialPremium = Omit<
+  PremiumTrainResult,
+  "queriedDeparture" | "queriedDepartureLabel" | "statusCode" | "protocol"
+>;
+
+function parseStandardResults(html: string): PartialStandard[] {
+  return extractForms(html, "booking-details.php")
+    .map((fragment): PartialStandard => {
+      const f = extractInputs(fragment);
+      const visible = extractVisibleTimes(fragment);
+      return {
+        resultType: "standard",
+        title: extractHeading(fragment),
+        trainId: f.idTrain || "",
+        trainNo: f.train || "",
+        from: f.from || f.leaving_from || "",
+        to: f.to || f.going_to || "",
+        departure: f.departure || visible.departure,
+        arrival: f.arrival || visible.arrival,
+        fare: {
+          economyAdult: f.ecoAdult || "",
+          economyChild: f.ecoChild || "",
+          firstAdult: f.firstAdult || "",
+          firstChild: f.firstChild || "",
+        },
+        openSeats: {
+          economy: f.ecoOpen || "",
+          firstClass: f.firstOpen || "",
+        },
+        coachOptions: extractSelectOptions(fragment, "coach"),
+        bookingEndpoint: `${METICKETS_BASE_URL}${STANDARD_BOOKING_PATH}`,
+        reviewEndpoint: `${METICKETS_BASE_URL}${STANDARD_REVIEW_PATH}`,
+      };
+    })
+    .filter((t) => t.trainId || t.trainNo);
+}
+
+function parsePremiumResults(html: string): PartialPremium[] {
+  return extractForms(html, "booking-details-premium.php")
+    .map((fragment): PartialPremium => {
+      const f = extractInputs(fragment);
+      const visible = extractVisibleTimes(fragment);
+      return {
+        resultType: "premium",
+        title: extractHeading(fragment),
+        trainId: f.idTrain || f.schedule_id || "",
+        trainNo: f.train || "",
+        from: f.from || f.leaving_from || "",
+        to: f.to || f.going_to || "",
+        departure: f.departure || visible.departure,
+        arrival: f.arrival || visible.arrival,
+        coach: f.coach || "",
+        fares: {
+          premiumAdult: f.premiumAdult || "",
+          premiumChild: f.premiumChild || "",
+        },
+        seatGroups: parsePremiumSeatBlob(f.seats),
+        bookingEndpoint: `${METICKETS_BASE_URL}${PREMIUM_BOOKING_PATH}`,
+        reviewEndpoint: `${METICKETS_BASE_URL}${PREMIUM_REVIEW_PATH}`,
+      };
+    })
+    .filter((t) => t.trainId || t.trainNo);
+}
+
+// ---------------------------------------------------------------------------
+// Deduplication
+// ---------------------------------------------------------------------------
+
+function uniqueBy<T>(items: T[], keyFn: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Session factory
+// ---------------------------------------------------------------------------
+
+function createSession(): Session {
+  const timeout = parseInt(process.env.SCRAPER_TIMEOUT ?? "30", 10);
+  const retry = parseInt(process.env.SCRAPER_RETRY ?? "2", 10);
+  const session = new Session({
+    preset: "chrome-latest",
+    timeout,
+    httpVersion: "auto",
+    allowRedirects: true,
+    retry,
+  });
+  session.headers["Accept-Language"] = "en-US,en;q=0.9";
+  return session;
+}
+
+// ---------------------------------------------------------------------------
+// Upstream network calls
+// ---------------------------------------------------------------------------
+
+type Schedule = "express" | "phase2" | "inter_county";
+
+async function loadHome(
+  session: Session,
+): Promise<{ csrfToken: string; html: string }> {
+  const response = await session.get(METICKETS_BASE_URL);
+  const csrfToken = extractCsrf(response.text);
+  if (!csrfToken) {
+    throw new Error("Could not find csrf_token on the booking home page.");
+  }
+  return { csrfToken, html: response.text };
+}
+
+async function loadTerminals(
+  session: Session,
+  schedule: Schedule,
+): Promise<{ basePath: string; terminals: SelectOption[] }> {
+  const basePath =
+    schedule === "inter_county" ? "/fetch-premium.php" : "/fetch.php";
+  const html = (
+    await session.get(
+      buildFetchUrl(basePath, {
+        type: "terminals",
+        schedule_type: schedule,
+      }),
+    )
+  ).text;
+  return { basePath, terminals: extractOptions(html) };
+}
+
+/** Resolve terminals/destinations from the OTHER endpoint family (for dual-endpoint scraping). */
+async function loadTerminalsAlt(
+  session: Session,
+  schedule: Schedule,
+): Promise<{ basePath: string; terminals: SelectOption[] }> {
+  // Opposite of loadTerminals: express uses fetch-premium.php, inter_county uses fetch.php
+  const basePath =
+    schedule === "inter_county" ? "/fetch.php" : "/fetch-premium.php";
+  const html = (
+    await session.get(
+      buildFetchUrl(basePath, {
+        type: "terminals",
+        schedule_type: schedule,
+      }),
+    )
+  ).text;
+  return { basePath, terminals: extractOptions(html) };
+}
+
+async function loadDestinations(
+  session: Session,
+  basePath: string,
+  schedule: Schedule,
+  terminalId: string,
+): Promise<SelectOption[]> {
+  const html = (
+    await session.get(
+      buildFetchUrl(basePath, {
+        type: "destinations",
+        schedule_type: schedule,
+        terminal_id: terminalId,
+      }),
+    )
+  ).text;
+  return extractOptions(html);
+}
+
+async function submitSearch(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    date: string;
+    departure: string;
+  },
+) {
+  if (config.schedule === "inter_county") {
+    return session.post(`${METICKETS_BASE_URL}${PREMIUM_SEARCH_PATH}`, {
+      data: {
+        csrf_token: csrfToken,
+        trip_type: "one_way",
+        premium_train_type: config.schedule,
+        premium_terminal_id: config.fromId,
+        premium_destination_id: config.toId,
+        premium_travel_date: formatDateForSite(config.date),
+        premium_depature_time: config.departure,
+      },
+    });
+  }
+  return session.post(`${METICKETS_BASE_URL}${STANDARD_SEARCH_PATH}`, {
+    data: {
+      csrf_token: csrfToken,
+      schedule_type: config.schedule,
+      terminal_id: config.fromId,
+      destination_id: config.toId,
+      "travel-date": formatDateForSite(config.date),
+      depature_time: config.departure,
+    },
+  });
+}
+
+/** Submit a search to the STANDARD endpoint (/search-view-results.php). */
+async function submitStandardSearch(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    date: string;
+    departure: string;
+  },
+) {
+  return session.post(`${METICKETS_BASE_URL}${STANDARD_SEARCH_PATH}`, {
+    data: {
+      csrf_token: csrfToken,
+      schedule_type: config.schedule,
+      terminal_id: config.fromId,
+      destination_id: config.toId,
+      "travel-date": formatDateForSite(config.date),
+      depature_time: config.departure,
+    },
+  });
+}
+
+/** Submit a search to the PREMIUM endpoint (/search-view-results-return.php). */
+async function submitPremiumSearch(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    date: string;
+    departure: string;
+  },
+) {
+  return session.post(`${METICKETS_BASE_URL}${PREMIUM_SEARCH_PATH}`, {
+    data: {
+      csrf_token: csrfToken,
+      trip_type: "one_way",
+      premium_train_type: config.schedule,
+      premium_terminal_id: config.fromId,
+      premium_destination_id: config.toId,
+      premium_travel_date: formatDateForSite(config.date),
+      premium_depature_time: config.departure,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+export interface RoutesData {
+  terminals: SelectOption[];
+  destinations: SelectOption[];
+  departures: SelectOption[];
+}
+
+export interface SearchData extends RoutesData {
+  results: TrainSearchResult[];
+  fullyBooked?: boolean;
+}
+
+export interface SearchOptions {
+  schedule: Schedule;
+  from: string;
+  to: string;
+  date: string;
+  departure?: string;
+  allTrains?: boolean;
+}
+
+export async function scrapeRoutes(
+  schedule: Schedule,
+  from?: string,
+): Promise<RoutesData> {
+  const session = createSession();
+  try {
+    const home = await loadHome(session);
+    const { basePath, terminals } = await loadTerminals(session, schedule);
+
+    const departures = extractNamedSelectOptions(
+      home.html,
+      schedule === "inter_county" ? "premium_depature_time" : "depature_time",
+    );
+
+    const fromOption = from
+      ? findOption(terminals, from)
+      : (terminals[0] ?? null);
+    if (!fromOption) {
+      throw new Error(`Departure terminal '${from}' was not found.`);
+    }
+
+    const destinations = await loadDestinations(
+      session,
+      basePath,
+      schedule,
+      fromOption.value,
+    );
+
+    return { terminals, destinations, departures };
+  } finally {
+    session.close();
+  }
+}
+
+export async function scrapeSearch(
+  options: SearchOptions,
+): Promise<SearchData> {
+  const session = createSession();
+  try {
+    const home = await loadHome(session);
+    const { basePath, terminals } = await loadTerminals(
+      session,
+      options.schedule,
+    );
+
+    const departures = extractNamedSelectOptions(
+      home.html,
+      options.schedule === "inter_county"
+        ? "premium_depature_time"
+        : "depature_time",
+    );
+
+    const fromOption = findOption(terminals, options.from);
+    if (!fromOption) {
+      throw new Error(`Departure terminal '${options.from}' was not found.`);
+    }
+
+    const destinations = await loadDestinations(
+      session,
+      basePath,
+      options.schedule,
+      fromOption.value,
+    );
+
+    const toOption = findOption(destinations, options.to);
+    if (!toOption) {
+      throw new Error(
+        `Destination '${options.to}' was not found for ${fromOption.label}.`,
+      );
+    }
+
+    // Resolve alternate endpoint IDs for dual-endpoint scraping
+    let altFromId: string | undefined;
+    let altToId: string | undefined;
+    let altDepartures: SelectOption[] | undefined;
+    if (hasPremiumCoach(options.schedule)) {
+      try {
+        const { basePath: altBasePath, terminals: altTerminals } =
+          await loadTerminalsAlt(session, options.schedule);
+        const altFrom = findOption(altTerminals, options.from);
+        if (altFrom) {
+          const altDests = await loadDestinations(
+            session,
+            altBasePath,
+            options.schedule,
+            altFrom.value,
+          );
+          const altTo = findOption(altDests, options.to);
+          if (altTo) {
+            altFromId = altFrom.value;
+            altToId = altTo.value;
+            const altDepName =
+              options.schedule === "inter_county"
+                ? "depature_time"
+                : "premium_depature_time";
+            altDepartures = extractNamedSelectOptions(home.html, altDepName);
+          }
+        }
+      } catch {
+        // Proceed with primary only
+      }
+    }
+
+    const departuresToQuery =
+      options.departure && !options.allTrains
+        ? [{ value: options.departure, label: options.departure }]
+        : uniqueBy(
+            [{ value: "", label: "<blank>" }, ...departures],
+            (o) => o.value,
+          );
+
+    const allResults: TrainSearchResult[] = [];
+    const soldOutSlots: string[] = [];
+    const fromLower = fromOption.label.toLowerCase();
+    const toLower = toOption.label.toLowerCase();
+
+    // --- Primary endpoint ---
+    for (const option of departuresToQuery) {
+      const response = await submitSearch(session, home.csrfToken, {
+        schedule: options.schedule,
+        fromId: fromOption.value,
+        toId: toOption.value,
+        date: options.date,
+        departure: option.value,
+      });
+
+      const parsed: (PartialStandard | PartialPremium)[] = [
+        ...parseStandardResults(response.text),
+        ...parsePremiumResults(response.text),
+      ];
+
+      const matching = parsed.filter(
+        (r) =>
+          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
+      );
+
+      if (
+        matching.length === 0 &&
+        options.schedule !== "phase2" &&
+        isSoldOut(response.text)
+      ) {
+        soldOutSlots.push(option.value);
+      }
+
+      for (const result of matching) {
+        allResults.push({
+          ...result,
+          queriedDeparture: option.value || "<blank>",
+          queriedDepartureLabel: option.label || option.value || "<blank>",
+          statusCode: response.statusCode,
+          protocol: response.protocol,
+        } as TrainSearchResult);
+      }
+    }
+
+    // --- Alternate endpoint (dual-endpoint for express/inter_county) ---
+    if (altFromId && altToId && altDepartures) {
+      const altSubmit =
+        options.schedule === "inter_county"
+          ? submitStandardSearch
+          : submitPremiumSearch;
+      const altDepsToQuery =
+        options.departure && !options.allTrains
+          ? [{ value: options.departure, label: options.departure }]
+          : uniqueBy(
+              [{ value: "", label: "<blank>" }, ...altDepartures],
+              (o) => o.value,
+            );
+
+      for (const option of altDepsToQuery) {
+        try {
+          const response = await altSubmit(session, home.csrfToken, {
+            schedule: options.schedule,
+            fromId: altFromId,
+            toId: altToId,
+            date: options.date,
+            departure: option.value,
+          });
+
+          const parsed: (PartialStandard | PartialPremium)[] =
+            options.schedule === "inter_county"
+              ? parseStandardResults(response.text)
+              : parsePremiumResults(response.text);
+
+          const matching = parsed.filter(
+            (r) =>
+              r.from.toLowerCase() === fromLower &&
+              r.to.toLowerCase() === toLower,
+          );
+
+          for (const result of matching) {
+            allResults.push({
+              ...result,
+              queriedDeparture: option.value || "<blank>",
+              queriedDepartureLabel: option.label || option.value || "<blank>",
+              statusCode: response.statusCode,
+              protocol: response.protocol,
+            } as TrainSearchResult);
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+    }
+
+    const results = uniqueBy(
+      allResults,
+      (r) =>
+        `${r.resultType}|${r.trainId}|${r.trainNo}|${r.departure}|${r.arrival}|${r.from}|${r.to}`,
+    );
+
+    // Detect sold-out: at least one slot returned sold-out with no matching results
+    const fullyBooked = soldOutSlots.length > 0;
+
+    // Express only: create synthetic sold-out entries for specific departure
+    // slots so the DaySheet shows them alongside available trains.
+    // Inter-county and phase2 don't have trains at the shared 3PM/10PM slots,
+    // so they just use the fullyBooked flag for a generic message.
+    if (fullyBooked && options.schedule === "express") {
+      const foundDepartures = new Set(
+        results.map((r) => {
+          const hhmm = r.departure.match(/(\d{2}):(\d{2})/);
+          return hhmm ? hhmm[0] : r.departure;
+        }),
+      );
+      for (const slot of soldOutSlots) {
+        if (!slot) continue;
+        const depOpt = departuresToQuery.find((o) => o.value === slot);
+        const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
+        if (!dep || foundDepartures.has(dep)) continue;
+
+        results.push({
+          resultType: "standard",
+          title: "",
+          trainId: "",
+          trainNo: "",
+          from: fromOption.label,
+          to: toOption.label,
+          departure: dep,
+          arrival: "",
+          fare: {
+            economyAdult: "",
+            economyChild: "",
+            firstAdult: "",
+            firstChild: "",
+          },
+          openSeats: { economy: "0", firstClass: "0" },
+          coachOptions: [],
+          bookingEndpoint: "",
+          reviewEndpoint: "",
+          queriedDeparture: slot,
+          queriedDepartureLabel: depOpt?.label || slot,
+          statusCode: 200,
+          protocol: "",
+        } as StandardTrainResult);
+      }
+    }
+
+    return { terminals, destinations, departures, results, fullyBooked };
+  } finally {
+    session.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Month scraper
+// ---------------------------------------------------------------------------
+
+function extractTime(datetime: string): string {
+  const ampm = datetime.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (ampm) return to24h(datetime);
+  const match = datetime.match(/\d{2}:\d{2}/);
+  return match ? match[0] : datetime;
+}
+
+function toMonthDayTrain(result: TrainSearchResult): MonthDayTrain {
+  if (result.resultType === "standard") {
+    return {
+      trainNo: result.trainNo,
+      departure: extractTime(result.departure),
+      economy: parseInt(result.openSeats.economy, 10) || 0,
+      firstClass: parseInt(result.openSeats.firstClass, 10) || 0,
+      premium: 0,
+    };
+  }
+  const total = result.seatGroups.reduce((sum, g) => {
+    if (g.decodeError) return sum;
+    const n =
+      typeof g.availableSeats === "number"
+        ? g.availableSeats
+        : parseInt(String(g.availableSeats ?? "0"), 10) || 0;
+    return sum + n;
+  }, 0);
+  return {
+    trainNo: result.trainNo,
+    departure: extractTime(result.departure),
+    economy: 0,
+    firstClass: 0,
+    premium: total,
+  };
+}
+
+/**
+ * Merge standard and premium MonthDayTrain entries by departure hour.
+ * Same physical train has different trainNo on each endpoint (e.g. E2 vs E12),
+ * so we match by HH:MM departure time.
+ */
+function mergeTrains(trains: MonthDayTrain[]): MonthDayTrain[] {
+  const byDep = new Map<string, MonthDayTrain>();
+  for (const t of trains) {
+    const existing = byDep.get(t.departure);
+    if (existing) {
+      // Merge: pick the trainNo from standard (more recognizable) and
+      // combine seat counts.
+      existing.economy = existing.economy || t.economy;
+      existing.firstClass = existing.firstClass || t.firstClass;
+      existing.premium = existing.premium || t.premium;
+      if (!existing.trainNo) existing.trainNo = t.trainNo;
+    } else {
+      byDep.set(t.departure, { ...t });
+    }
+  }
+  return [...byDep.values()];
+}
+
+/** Whether a schedule type uses dual endpoints (standard + premium). */
+function hasPremiumCoach(schedule: Schedule): boolean {
+  return schedule === "express" || schedule === "inter_county";
+}
+
+// Scrape a single day using an already-established session and CSRF token.
+// Departure queries run sequentially within the session to stay friendly to
+// PHP's per-session file lock (concurrent requests sharing the same
+// PHPSESSID are serialised server-side anyway).
+async function scrapeDayWithSession(
+  session: Session,
+  csrfToken: string,
+  config: {
+    schedule: Schedule;
+    fromId: string;
+    toId: string;
+    fromLabel: string;
+    toLabel: string;
+    date: string;
+    departuresToQuery: SelectOption[];
+    // Alternate endpoint IDs (for dual standard+premium scraping)
+    altFromId?: string;
+    altToId?: string;
+    altDeparturesToQuery?: SelectOption[];
+  },
+): Promise<MonthDay> {
+  const dayResults: TrainSearchResult[] = [];
+  const soldOutSlots: string[] = [];
+  const fromLower = config.fromLabel.toLowerCase();
+  const toLower = config.toLabel.toLowerCase();
+
+  // --- Primary endpoint queries ---
+  for (const option of config.departuresToQuery) {
+    try {
+      const response = await submitSearch(session, csrfToken, {
+        schedule: config.schedule,
+        fromId: config.fromId,
+        toId: config.toId,
+        date: config.date,
+        departure: option.value,
+      });
+
+      const parsed: (PartialStandard | PartialPremium)[] = [
+        ...parseStandardResults(response.text),
+        ...parsePremiumResults(response.text),
+      ];
+
+      const matching = parsed.filter(
+        (r) =>
+          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
+      );
+
+      if (
+        matching.length === 0 &&
+        option.value &&
+        config.schedule !== "phase2" &&
+        isSoldOut(response.text)
+      ) {
+        soldOutSlots.push(option.value);
+      }
+
+      for (const result of matching) {
+        dayResults.push({
+          ...result,
+          queriedDeparture: option.value || "<blank>",
+          queriedDepartureLabel: option.label || option.value || "<blank>",
+          statusCode: response.statusCode,
+          protocol: response.protocol,
+        } as TrainSearchResult);
+      }
+    } catch {
+      // A single departure-slot failure should not kill the whole day.
+    }
+  }
+
+  // --- Alternate endpoint queries (dual-endpoint for express/inter_county) ---
+  if (config.altFromId && config.altToId && config.altDeparturesToQuery) {
+    // Determine which function to call based on schedule:
+    // inter_county primary=premium, alt=standard
+    // express primary=standard, alt=premium
+    const altSubmit =
+      config.schedule === "inter_county"
+        ? submitStandardSearch
+        : submitPremiumSearch;
+    const altDepartures = config.altDeparturesToQuery;
+
+    for (const option of altDepartures) {
+      try {
+        const response = await altSubmit(session, csrfToken, {
+          schedule: config.schedule,
+          fromId: config.altFromId,
+          toId: config.altToId,
+          date: config.date,
+          departure: option.value,
+        });
+
+        // Parse only the relevant result type from this endpoint
+        const parsed: (PartialStandard | PartialPremium)[] =
+          config.schedule === "inter_county"
+            ? parseStandardResults(response.text)
+            : parsePremiumResults(response.text);
+
+        const matching = parsed.filter(
+          (r) =>
+            r.from.toLowerCase() === fromLower &&
+            r.to.toLowerCase() === toLower,
+        );
+
+        for (const result of matching) {
+          dayResults.push({
+            ...result,
+            queriedDeparture: option.value || "<blank>",
+            queriedDepartureLabel: option.label || option.value || "<blank>",
+            statusCode: response.statusCode,
+            protocol: response.protocol,
+          } as TrainSearchResult);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  const rawTrains = uniqueBy(
+    dayResults,
+    (r) => `${r.resultType}|${r.trainId}|${r.trainNo}|${r.departure}`,
+  ).map(toMonthDayTrain);
+
+  // Merge standard + premium entries for the same departure time
+  const trains = hasPremiumCoach(config.schedule)
+    ? mergeTrains(rawTrains)
+    : rawTrains;
+
+  const fullyBooked = soldOutSlots.length > 0;
+
+  // Express only: synthetic sold-out entries for specific departure slots.
+  // The 3PM/10PM slots map to real express trains. Inter-county and phase2
+  // don't have trains at those times, so they just use the fullyBooked flag.
+  if (fullyBooked && config.schedule === "express") {
+    const foundDepartures = new Set(trains.map((t) => t.departure));
+    for (const slot of soldOutSlots) {
+      const depOpt = config.departuresToQuery.find((o) => o.value === slot);
+      const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
+      if (dep && !foundDepartures.has(dep)) {
+        trains.push({
+          trainNo: "",
+          departure: dep,
+          economy: 0,
+          firstClass: 0,
+          premium: 0,
+        });
+      }
+    }
+  }
+
+  return { date: config.date, trains, fullyBooked };
+}
+
+// How many parallel PHP sessions to open for a month scrape.
+const MONTH_CONCURRENCY = parseInt(process.env.SCRAPER_CONCURRENCY ?? "20", 10);
+
+/**
+ * Scrape a full month using multiple parallel sessions.
+ *
+ * `onDay` is called once per day as each result arrives (potentially out of
+ * calendar order since workers race). Callers that need sorted output should
+ * sort after all calls have settled (see `scrapeMonth`).
+ */
+export async function scrapeMonthStreaming(
+  schedule: Schedule,
+  from: string,
+  to: string,
+  year: number,
+  month: number,
+  onDay: (day: MonthDay) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let fromId: string;
+  let toId: string;
+  let fromLabel: string;
+  let toLabel: string;
+  let departuresToQuery: SelectOption[];
+  // Alt endpoint IDs for dual-endpoint scraping (express/inter_county)
+  let altFromId: string | undefined;
+  let altToId: string | undefined;
+  let altDeparturesToQuery: SelectOption[] | undefined;
+
+  {
+    const setup = createSession();
+    try {
+      const home = await loadHome(setup);
+      const { basePath, terminals } = await loadTerminals(setup, schedule);
+
+      const departures = extractNamedSelectOptions(
+        home.html,
+        schedule === "inter_county" ? "premium_depature_time" : "depature_time",
+      );
+
+      const fromOption = findOption(terminals, from);
+      if (!fromOption) {
+        throw new Error(`Departure terminal '${from}' was not found.`);
+      }
+
+      const destinations = await loadDestinations(
+        setup,
+        basePath,
+        schedule,
+        fromOption.value,
+      );
+
+      const toOption = findOption(destinations, to);
+      if (!toOption) {
+        throw new Error(
+          `Destination '${to}' was not found for ${fromOption.label}.`,
+        );
+      }
+
+      fromId = fromOption.value;
+      toId = toOption.value;
+      fromLabel = fromOption.label;
+      toLabel = toOption.label;
+      departuresToQuery = uniqueBy(
+        [{ value: "", label: "<blank>" }, ...departures],
+        (o) => o.value,
+      );
+
+      // Resolve alternate endpoint IDs for dual-endpoint scraping
+      if (hasPremiumCoach(schedule)) {
+        try {
+          const { basePath: altBasePath, terminals: altTerminals } =
+            await loadTerminalsAlt(setup, schedule);
+
+          const altFromOption = findOption(altTerminals, from);
+          if (altFromOption) {
+            const altDestinations = await loadDestinations(
+              setup,
+              altBasePath,
+              schedule,
+              altFromOption.value,
+            );
+            const altToOption = findOption(altDestinations, to);
+            if (altToOption) {
+              altFromId = altFromOption.value;
+              altToId = altToOption.value;
+              const altDepName =
+                schedule === "inter_county"
+                  ? "depature_time"
+                  : "premium_depature_time";
+              const altDeps = extractNamedSelectOptions(home.html, altDepName);
+              altDeparturesToQuery = uniqueBy(
+                [{ value: "", label: "<blank>" }, ...altDeps],
+                (o) => o.value,
+              );
+            }
+          }
+        } catch {
+          // If alt resolution fails, proceed with primary only
+        }
+      }
+    } finally {
+      setup.close();
+    }
+  }
+
+  // Phase 2: distribute dates across MONTH_CONCURRENCY worker sessions.
+  // Each worker opens its OWN homepage → own PHPSESSID → no session lock
+  // contention. Within each worker, days are processed sequentially.
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const horizonStr = lastBookableDate(schedule);
+  const dates = Array.from({ length: daysInMonth }, (_, i) => {
+    const d = i + 1;
+    return `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  }).filter((date) => date >= todayStr && date <= horizonStr);
+
+  const chunkSize = Math.ceil(dates.length / MONTH_CONCURRENCY);
+  const chunks: string[][] = [];
+  for (let i = 0; i < dates.length; i += chunkSize) {
+    chunks.push(dates.slice(i, i + chunkSize));
+  }
+
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      const worker = createSession();
+      try {
+        const { csrfToken } = await loadHome(worker);
+
+        for (const date of chunk) {
+          if (signal?.aborted) break;
+
+          try {
+            const day = await scrapeDayWithSession(worker, csrfToken, {
+              schedule,
+              fromId,
+              toId,
+              fromLabel,
+              toLabel,
+              date,
+              departuresToQuery,
+              altFromId,
+              altToId,
+              altDeparturesToQuery,
+            });
+            onDay(day);
+          } catch {
+            // Emit an empty day rather than aborting the whole stream.
+            onDay({ date, trains: [] });
+          }
+
+          worker.refresh();
+        }
+      } finally {
+        worker.close();
+      }
+    }),
+  );
+}
+
+/**
+ * Blocking version — collects all days and returns them sorted.
+ * Used by the cached `/api/trains/month` route handler.
+ */
+export async function scrapeMonth(
+  schedule: Schedule,
+  from: string,
+  to: string,
+  year: number,
+  month: number,
+): Promise<MonthDay[]> {
+  const days: MonthDay[] = [];
+  await scrapeMonthStreaming(schedule, from, to, year, month, (day) =>
+    days.push(day),
+  );
+  return days.sort((a, b) => a.date.localeCompare(b.date));
+}
