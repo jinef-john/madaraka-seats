@@ -30,7 +30,7 @@ export default function RootLayout({
       lang="en"
       className={`${manrope.variable} ${inter.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">
+      <body className="min-h-full flex flex-col no-scrollbar">
         <Providers>{children}</Providers>
       </body>
     </html>
