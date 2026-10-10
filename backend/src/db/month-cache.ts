@@ -25,6 +25,11 @@ export async function setMonth(
   month: number,
   days: MonthDay[],
 ): Promise<void> {
+  const existing = (await getMonth(scheduleType, from, to, year, month)) ?? [];
+  const byDate = new Map(existing.map((d) => [d.date, d]));
+  for (const d of days) byDate.set(d.date, d);
+  days = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+
   await pool.query(
     `INSERT INTO month_cache (schedule_type, from_station, to_station, year, month, days, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, NOW())

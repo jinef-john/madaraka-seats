@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
-import { initDb } from "./db/index.js";
+import { initDb, pool } from "./db/index.js";
+import { closeSharedSession } from "./utils/http-client.js";
 import { startScheduler } from "./scheduler/index.js";
 import { monthHandler } from "./routes/month.js";
 import { searchHandler } from "./routes/search.js";
@@ -35,11 +36,23 @@ async function main() {
   await initDb();
   console.log("[db] schema ready");
 
-  startScheduler();
+  const stopScheduler = startScheduler();
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`[server] listening on port ${PORT}`);
   });
+
+  const shutdown = (signal: string) => {
+    console.log(`[server] ${signal} received, shutting down`);
+    stopScheduler();
+    server.close(() => {
+      closeSharedSession();
+      pool.end().finally(() => process.exit(0));
+    });
+    setTimeout(() => process.exit(0), 10_000).unref();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 main().catch((err) => {

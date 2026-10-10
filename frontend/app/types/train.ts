@@ -18,6 +18,8 @@ export interface TrainTypeConfig {
   departureOptions: SelectOption[];
   /** How far ahead (in days from today) the site allows bookings */
   bookingHorizonDays: number;
+  /** Weekdays the service runs (Date.getDay: 0 = Sunday). Omitted = daily. */
+  operatingDays?: number[];
 }
 
 export interface SearchQuery {
@@ -68,6 +70,15 @@ export interface PremiumSeatGroup {
   seats: string[];
   bookedSeats: string[];
   decodeError?: string;
+  deck?: number;
+  seatMap?: PremiumSeat[];
+}
+
+export interface PremiumSeat {
+  number: string;
+  row: number;
+  col: number;
+  status: "available" | "booked";
 }
 
 export interface PremiumTrainResult extends SearchResultBase {
