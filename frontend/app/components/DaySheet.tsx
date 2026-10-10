@@ -5,6 +5,7 @@ import { Dialog } from "radix-ui";
 import { X, ExternalLink, Clock, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { runsOn } from "@/utils/train-config";
 import type {
   MonthDay,
   TrainType,
@@ -249,12 +250,26 @@ function TrainCard({
           </div>
 
           {totalSeats > 0 && (
-            <Button asChild size="sm" className="rounded-full shrink-0 h-8">
-              <a href={bookingUrl} target="_blank" rel="noopener noreferrer">
-                Book
-                <ExternalLink className="size-3 ml-1" />
-              </a>
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled
+                title="Reserve directly from here — coming soon"
+                className="rounded-full h-8"
+              >
+                Reserve
+                <span className="ml-1.5 text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
+                  Soon
+                </span>
+              </Button>
+              <Button asChild size="sm" className="rounded-full h-8">
+                <a href={bookingUrl} target="_blank" rel="noopener noreferrer">
+                  Book
+                  <ExternalLink className="size-3 ml-1" />
+                </a>
+              </Button>
+            </div>
           )}
         </div>
 
@@ -339,10 +354,12 @@ export function DaySheet({
       )
     : 0;
 
-  // Only fetch real-time search data when seats are scarce (< 300).
-  // Sold-out days (0 seats, including empty trains array) and days with
-  // plenty of availability (>= 300) just use the cached month data.
-  const needsSearch = day !== null && monthTotal > 0 && monthTotal < 300;
+  const needsSearch =
+    day !== null &&
+    runsOn(scheduleType, day.date) &&
+    (day.trains.length === 0
+      ? !day.fullyBooked
+      : monthTotal > 0 && monthTotal < 300);
 
   const { data: searchData, isFetching: isSearching } =
     useQuery<SearchResponse>({
@@ -363,7 +380,8 @@ export function DaySheet({
     });
 
   const alreadySoldOut =
-    day !== null && monthTotal === 0;
+    day !== null &&
+    (!!day.fullyBooked || (day.trains.length > 0 && monthTotal === 0));
 
   const trains: TrainInfo[] = searchData?.results
     ? mergeSearchResults(searchData.results)
