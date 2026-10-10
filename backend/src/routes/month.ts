@@ -3,6 +3,8 @@ import type { TrainType } from "../types/train.js";
 import { getMonth, setMonth } from "../db/month-cache.js";
 import { scrapeMonth } from "../utils/scraper.js";
 
+const inFlight = new Set<string>();
+
 function isTrainType(v: unknown): v is TrainType {
   return v === "express" || v === "inter_county" || v === "phase2";
 }
@@ -38,9 +40,13 @@ export async function monthHandler(req: Request, res: Response): Promise<void> {
     res.json({ scheduleType, from, to, year, month, days: [], loading: true });
 
     // Fire-and-forget scrape to populate cache for next request
+    const key = `${scheduleType}|${from}|${to}|${year}|${month}`;
+    if (inFlight.has(key)) return;
+    inFlight.add(key);
     scrapeMonth(scheduleType, String(from), String(to), year, month)
       .then((days) => setMonth(scheduleType, String(from), String(to), year, month, days))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => inFlight.delete(key));
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

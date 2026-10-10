@@ -45,7 +45,16 @@ async function warmBatch(
   }
 }
 
-export async function refresh(): Promise<void> {
+let running: Promise<void> | null = null;
+
+export function refresh(): Promise<void> {
+  running ??= doRefresh().finally(() => {
+    running = null;
+  });
+  return running;
+}
+
+async function doRefresh(): Promise<void> {
   const jobs: { scheduleType: TrainType; from: string; to: string; year: number; month: number }[] = [];
 
   for (const cfg of Object.values(TRAIN_TYPE_CONFIG)) {
@@ -74,13 +83,18 @@ export async function refresh(): Promise<void> {
   console.log(`[scheduler] refresh complete`);
 }
 
-export function startScheduler(): void {
+export function startScheduler(): () => void {
   // Run once on startup to warm the cache
   refresh().catch((err) => console.error("[scheduler] initial refresh failed:", err));
 
-  cron.schedule(REFRESH_CRON, () => {
+  const task = cron.schedule(REFRESH_CRON, () => {
+    if (running) {
+      console.log("[scheduler] previous refresh still running, skipping tick");
+      return;
+    }
     refresh().catch((err) => console.error("[scheduler] refresh failed:", err));
   });
 
   console.log(`[scheduler] started, cron: ${REFRESH_CRON}`);
+  return () => task.stop();
 }
