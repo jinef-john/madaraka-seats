@@ -1,26 +1,23 @@
-import { Session } from "httpcloak";
+import type { Session } from "httpcloak";
 
 import type {
   MonthDay,
   MonthDayTrain,
-  PremiumSeatGroup,
-  PremiumTrainResult,
   SelectOption,
   StandardTrainResult,
   TrainSearchResult,
 } from "../types/train.js";
-import { METICKETS_BASE_URL, lastBookableDate } from "./train-config.js";
+import { METICKETS_BASE_URL, lastBookableDate, runsOn } from "./train-config.js";
+import { createSession } from "./http-client.js";
+import { premiumDayTrains, premiumSearch } from "./premium-api.js";
 
 // ---------------------------------------------------------------------------
 // Upstream path constants
 // ---------------------------------------------------------------------------
 
 const STANDARD_SEARCH_PATH = "/search-view-results.php";
-const PREMIUM_SEARCH_PATH = "/search-view-results-return.php";
 const STANDARD_BOOKING_PATH = "/booking-details.php";
-const PREMIUM_BOOKING_PATH = "/booking-details-premium.php";
 const STANDARD_REVIEW_PATH = "/review-and-pay.php";
-const PREMIUM_REVIEW_PATH = "/review-and-pay-premium.php";
 
 // ---------------------------------------------------------------------------
 // String / HTML helpers
@@ -108,6 +105,9 @@ export function findOption(
     options.find((o) => o.label.toLowerCase() === want) ??
     options.find((o) => o.value.toLowerCase() === want) ??
     options.find((o) => o.label.toLowerCase().includes(want)) ??
+    options.find(
+      (o) => o.label.length >= 4 && want.startsWith(o.label.toLowerCase()),
+    ) ??
     null
   );
 }
@@ -180,100 +180,13 @@ function extractVisibleTimes(fragment: string): {
 }
 
 // ---------------------------------------------------------------------------
-// PHP serialization decoder
-// ---------------------------------------------------------------------------
-
-function parsePhpSerialized(input: string): unknown {
-  let offset = 0;
-
-  function readUntil(char: string): string {
-    const end = input.indexOf(char, offset);
-    if (end === -1)
-      throw new Error(`Unterminated token while looking for '${char}'`);
-    const value = input.slice(offset, end);
-    offset = end + 1;
-    return value;
-  }
-
-  function readValue(): unknown {
-    const type = input[offset];
-    offset += 2;
-
-    if (type === "N") return null;
-    if (type === "i") return Number.parseInt(readUntil(";"), 10);
-    if (type === "d") return Number.parseFloat(readUntil(";"));
-    if (type === "b") return readUntil(";") === "1";
-
-    if (type === "s") {
-      const length = Number.parseInt(readUntil(":"), 10);
-      if (input[offset] !== '"')
-        throw new Error("Invalid serialized string start");
-      offset += 1;
-      const value = input.slice(offset, offset + length);
-      offset += length;
-      if (input[offset] !== '"' || input[offset + 1] !== ";")
-        throw new Error("Invalid serialized string end");
-      offset += 2;
-      return value;
-    }
-
-    if (type === "a") {
-      const count = Number.parseInt(readUntil(":"), 10);
-      if (input[offset] !== "{")
-        throw new Error("Invalid serialized array start");
-      offset += 1;
-      const entries: [unknown, unknown][] = [];
-      for (let i = 0; i < count; i++) {
-        entries.push([readValue(), readValue()]);
-      }
-      if (input[offset] !== "}")
-        throw new Error("Invalid serialized array end");
-      offset += 1;
-      const isDense = entries.every(([k], i) => Number(k) === i);
-      if (isDense) return entries.map(([, v]) => v);
-      return Object.fromEntries(entries as [string, unknown][]);
-    }
-
-    throw new Error(`Unsupported PHP serialized type '${type}'`);
-  }
-
-  return readValue();
-}
-
-function parsePremiumSeatBlob(encoded: string): PremiumSeatGroup[] {
-  if (!encoded) return [];
-  try {
-    const decoded = Buffer.from(encoded, "base64").toString("utf8");
-    const parsed = parsePhpSerialized(decoded);
-    if (!Array.isArray(parsed)) return [];
-    return (parsed as Record<string, unknown>[]).map((coach) => ({
-      id: coach.id as string | number | undefined,
-      name: coach.name as string | undefined,
-      availableSeats: coach.available_seats as string | number | undefined,
-      seats: Array.isArray(coach.seats)
-        ? (coach.seats as string[])
-        : Object.values((coach.seats as Record<string, string>) ?? {}),
-      bookedSeats: Array.isArray(coach.booked_seats)
-        ? (coach.booked_seats as string[])
-        : Object.values((coach.booked_seats as Record<string, string>) ?? {}),
-    }));
-  } catch (error) {
-    return [
-      { decodeError: (error as Error).message, seats: [], bookedSeats: [] },
-    ];
-  }
-}
-
-// ---------------------------------------------------------------------------
 // "Fully Booked" / sold-out detection
 // ---------------------------------------------------------------------------
 
+// The waiting-list form is now part of every page template, so only the
+// explicit message counts.
 function isSoldOut(html: string): boolean {
-  // Express/standard: explicit "Fully Booked" message
-  if (/fully\s+booked/i.test(html)) return true;
-  // Inter-county: waiting-list form appears when premium trains are sold out
-  if (/waiting-list-confirmed\.php/i.test(html)) return true;
-  return false;
+  return /fully\s+booked/i.test(html);
 }
 
 function departureTimeFromSlot(label: string): string {
@@ -288,10 +201,6 @@ function departureTimeFromSlot(label: string): string {
 
 type PartialStandard = Omit<
   StandardTrainResult,
-  "queriedDeparture" | "queriedDepartureLabel" | "statusCode" | "protocol"
->;
-type PartialPremium = Omit<
-  PremiumTrainResult,
   "queriedDeparture" | "queriedDepartureLabel" | "statusCode" | "protocol"
 >;
 
@@ -327,33 +236,6 @@ function parseStandardResults(html: string): PartialStandard[] {
     .filter((t) => t.trainId || t.trainNo);
 }
 
-function parsePremiumResults(html: string): PartialPremium[] {
-  return extractForms(html, "booking-details-premium.php")
-    .map((fragment): PartialPremium => {
-      const f = extractInputs(fragment);
-      const visible = extractVisibleTimes(fragment);
-      return {
-        resultType: "premium",
-        title: extractHeading(fragment),
-        trainId: f.idTrain || f.schedule_id || "",
-        trainNo: f.train || "",
-        from: f.from || f.leaving_from || "",
-        to: f.to || f.going_to || "",
-        departure: f.departure || visible.departure,
-        arrival: f.arrival || visible.arrival,
-        coach: f.coach || "",
-        fares: {
-          premiumAdult: f.premiumAdult || "",
-          premiumChild: f.premiumChild || "",
-        },
-        seatGroups: parsePremiumSeatBlob(f.seats),
-        bookingEndpoint: `${METICKETS_BASE_URL}${PREMIUM_BOOKING_PATH}`,
-        reviewEndpoint: `${METICKETS_BASE_URL}${PREMIUM_REVIEW_PATH}`,
-      };
-    })
-    .filter((t) => t.trainId || t.trainNo);
-}
-
 // ---------------------------------------------------------------------------
 // Deduplication
 // ---------------------------------------------------------------------------
@@ -369,24 +251,6 @@ function uniqueBy<T>(items: T[], keyFn: (item: T) => string): T[] {
     }
   }
   return out;
-}
-
-// ---------------------------------------------------------------------------
-// Session factory
-// ---------------------------------------------------------------------------
-
-function createSession(): Session {
-  const timeout = parseInt(process.env.SCRAPER_TIMEOUT ?? "30", 10);
-  const retry = parseInt(process.env.SCRAPER_RETRY ?? "2", 10);
-  const session = new Session({
-    preset: "chrome-latest",
-    timeout,
-    httpVersion: "auto",
-    allowRedirects: true,
-    retry,
-  });
-  session.headers["Accept-Language"] = "en-US,en;q=0.9";
-  return session;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,48 +273,23 @@ async function loadHome(
 async function loadTerminals(
   session: Session,
   schedule: Schedule,
-): Promise<{ basePath: string; terminals: SelectOption[] }> {
-  const basePath =
-    schedule === "inter_county" ? "/fetch-premium.php" : "/fetch.php";
+): Promise<SelectOption[]> {
   const html = (
     await session.get(
-      buildFetchUrl(basePath, {
-        type: "terminals",
-        schedule_type: schedule,
-      }),
+      buildFetchUrl("/fetch.php", { type: "terminals", schedule_type: schedule }),
     )
   ).text;
-  return { basePath, terminals: extractOptions(html) };
-}
-
-/** Resolve terminals/destinations from the OTHER endpoint family (for dual-endpoint scraping). */
-async function loadTerminalsAlt(
-  session: Session,
-  schedule: Schedule,
-): Promise<{ basePath: string; terminals: SelectOption[] }> {
-  // Opposite of loadTerminals: express uses fetch-premium.php, inter_county uses fetch.php
-  const basePath =
-    schedule === "inter_county" ? "/fetch.php" : "/fetch-premium.php";
-  const html = (
-    await session.get(
-      buildFetchUrl(basePath, {
-        type: "terminals",
-        schedule_type: schedule,
-      }),
-    )
-  ).text;
-  return { basePath, terminals: extractOptions(html) };
+  return extractOptions(html);
 }
 
 async function loadDestinations(
   session: Session,
-  basePath: string,
   schedule: Schedule,
   terminalId: string,
 ): Promise<SelectOption[]> {
   const html = (
     await session.get(
-      buildFetchUrl(basePath, {
+      buildFetchUrl("/fetch.php", {
         type: "destinations",
         schedule_type: schedule,
         terminal_id: terminalId,
@@ -460,9 +299,15 @@ async function loadDestinations(
   return extractOptions(html);
 }
 
+interface LegacySession {
+  session: Session;
+  csrfToken: string;
+}
+
+// A rejected search (stale CSRF, server under load) redirects to index.php
+// with a 200, which must not be mistaken for an empty or sold-out result.
 async function submitSearch(
-  session: Session,
-  csrfToken: string,
+  ctx: LegacySession,
   config: {
     schedule: Schedule;
     fromId: string;
@@ -471,78 +316,137 @@ async function submitSearch(
     departure: string;
   },
 ) {
-  if (config.schedule === "inter_county") {
-    return session.post(`${METICKETS_BASE_URL}${PREMIUM_SEARCH_PATH}`, {
-      data: {
-        csrf_token: csrfToken,
-        trip_type: "one_way",
-        premium_train_type: config.schedule,
-        premium_terminal_id: config.fromId,
-        premium_destination_id: config.toId,
-        premium_travel_date: formatDateForSite(config.date),
-        premium_depature_time: config.departure,
+  for (let attempt = 0; ; attempt++) {
+    const response = await ctx.session.post(
+      `${METICKETS_BASE_URL}${STANDARD_SEARCH_PATH}`,
+      {
+        data: {
+          csrf_token: ctx.csrfToken,
+          schedule_type: config.schedule,
+          terminal_id: config.fromId,
+          destination_id: config.toId,
+          "travel-date": formatDateForSite(config.date),
+          depature_time: config.departure,
+        },
       },
-    });
+    );
+    if (response.url.includes(STANDARD_SEARCH_PATH)) return response;
+    if (attempt >= 1) throw new Error(`search rejected (${response.url})`);
+    ctx.csrfToken = (await loadHome(ctx.session)).csrfToken;
   }
-  return session.post(`${METICKETS_BASE_URL}${STANDARD_SEARCH_PATH}`, {
-    data: {
-      csrf_token: csrfToken,
-      schedule_type: config.schedule,
-      terminal_id: config.fromId,
-      destination_id: config.toId,
-      "travel-date": formatDateForSite(config.date),
-      depature_time: config.departure,
-    },
-  });
 }
 
-/** Submit a search to the STANDARD endpoint (/search-view-results.php). */
-async function submitStandardSearch(
-  session: Session,
-  csrfToken: string,
-  config: {
-    schedule: Schedule;
-    fromId: string;
-    toId: string;
-    date: string;
-    departure: string;
-  },
-) {
-  return session.post(`${METICKETS_BASE_URL}${STANDARD_SEARCH_PATH}`, {
-    data: {
-      csrf_token: csrfToken,
-      schedule_type: config.schedule,
-      terminal_id: config.fromId,
-      destination_id: config.toId,
-      "travel-date": formatDateForSite(config.date),
-      depature_time: config.departure,
-    },
-  });
+interface ResolvedRoute {
+  fromId: string;
+  toId: string;
+  fromLabel: string;
+  toLabel: string;
+  terminals: SelectOption[];
+  destinations: SelectOption[];
+  departures: SelectOption[];
+  departuresToQuery: SelectOption[];
 }
 
-/** Submit a search to the PREMIUM endpoint (/search-view-results-return.php). */
-async function submitPremiumSearch(
+async function resolveRoute(
   session: Session,
-  csrfToken: string,
-  config: {
-    schedule: Schedule;
-    fromId: string;
-    toId: string;
-    date: string;
-    departure: string;
-  },
-) {
-  return session.post(`${METICKETS_BASE_URL}${PREMIUM_SEARCH_PATH}`, {
-    data: {
-      csrf_token: csrfToken,
-      trip_type: "one_way",
-      premium_train_type: config.schedule,
-      premium_terminal_id: config.fromId,
-      premium_destination_id: config.toId,
-      premium_travel_date: formatDateForSite(config.date),
-      premium_depature_time: config.departure,
-    },
-  });
+  homeHtml: string,
+  schedule: Schedule,
+  from: string,
+  to: string,
+): Promise<ResolvedRoute> {
+  const terminals = await loadTerminals(session, schedule);
+  const departures = extractNamedSelectOptions(homeHtml, "depature_time");
+
+  const fromOption = findOption(terminals, from);
+  if (!fromOption) {
+    throw new Error(`Departure terminal '${from}' was not found.`);
+  }
+  const destinations = await loadDestinations(session, schedule, fromOption.value);
+  const toOption = findOption(destinations, to);
+  if (!toOption) {
+    throw new Error(`Destination '${to}' was not found for ${fromOption.label}.`);
+  }
+
+  return {
+    fromId: fromOption.value,
+    toId: toOption.value,
+    fromLabel: fromOption.label,
+    toLabel: toOption.label,
+    terminals,
+    destinations,
+    departures,
+    departuresToQuery: uniqueBy(
+      [{ value: "", label: "<blank>" }, ...departures],
+      (o) => o.value,
+    ),
+  };
+}
+
+async function queryLegacyDay(
+  ctx: LegacySession,
+  schedule: Schedule,
+  route: ResolvedRoute,
+  date: string,
+  departuresToQuery: SelectOption[],
+): Promise<{
+  results: StandardTrainResult[];
+  soldOutSlots: string[];
+  failedSlots: number;
+}> {
+  const results: StandardTrainResult[] = [];
+  const soldOutSlots: string[] = [];
+  let failedSlots = 0;
+  const fromLower = route.fromLabel.toLowerCase();
+  const toLower = route.toLabel.toLowerCase();
+
+  for (const option of departuresToQuery) {
+    try {
+      const response = await submitSearch(ctx, {
+        schedule,
+        fromId: route.fromId,
+        toId: route.toId,
+        date,
+        departure: option.value,
+      });
+
+      const matching = parseStandardResults(response.text).filter(
+        (r) =>
+          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
+      );
+
+      if (
+        matching.length === 0 &&
+        option.value &&
+        schedule !== "phase2" &&
+        isSoldOut(response.text)
+      ) {
+        soldOutSlots.push(option.value);
+      }
+
+      for (const result of matching) {
+        results.push({
+          ...result,
+          queriedDeparture: option.value || "<blank>",
+          queriedDepartureLabel: option.label || option.value || "<blank>",
+          statusCode: response.statusCode,
+          protocol: response.protocol,
+        });
+      }
+    } catch {
+      failedSlots++;
+    }
+  }
+
+  return { results, soldOutSlots, failedSlots };
+}
+
+function soldOutDeparture(
+  slot: string,
+  departuresToQuery: SelectOption[],
+): { dep: string; label: string } | null {
+  const depOpt = departuresToQuery.find((o) => o.value === slot);
+  const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
+  return dep ? { dep, label: depOpt?.label || slot } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -576,12 +480,8 @@ export async function scrapeRoutes(
   const session = createSession();
   try {
     const home = await loadHome(session);
-    const { basePath, terminals } = await loadTerminals(session, schedule);
-
-    const departures = extractNamedSelectOptions(
-      home.html,
-      schedule === "inter_county" ? "premium_depature_time" : "depature_time",
-    );
+    const terminals = await loadTerminals(session, schedule);
+    const departures = extractNamedSelectOptions(home.html, "depature_time");
 
     const fromOption = from
       ? findOption(terminals, from)
@@ -592,7 +492,6 @@ export async function scrapeRoutes(
 
     const destinations = await loadDestinations(
       session,
-      basePath,
       schedule,
       fromOption.value,
     );
@@ -606,208 +505,65 @@ export async function scrapeRoutes(
 export async function scrapeSearch(
   options: SearchOptions,
 ): Promise<SearchData> {
+  if (!runsOn(options.schedule, options.date)) {
+    return { terminals: [], destinations: [], departures: [], results: [] };
+  }
+
+  const premiumPromise = premiumSearch(
+    options.schedule,
+    options.from,
+    options.to,
+    options.date,
+  ).catch(() => []);
+
   const session = createSession();
   try {
     const home = await loadHome(session);
-    const { basePath, terminals } = await loadTerminals(
+    const route = await resolveRoute(
       session,
-      options.schedule,
-    );
-
-    const departures = extractNamedSelectOptions(
       home.html,
-      options.schedule === "inter_county"
-        ? "premium_depature_time"
-        : "depature_time",
-    );
-
-    const fromOption = findOption(terminals, options.from);
-    if (!fromOption) {
-      throw new Error(`Departure terminal '${options.from}' was not found.`);
-    }
-
-    const destinations = await loadDestinations(
-      session,
-      basePath,
       options.schedule,
-      fromOption.value,
+      options.from,
+      options.to,
     );
-
-    const toOption = findOption(destinations, options.to);
-    if (!toOption) {
-      throw new Error(
-        `Destination '${options.to}' was not found for ${fromOption.label}.`,
-      );
-    }
-
-    // Resolve alternate endpoint IDs for dual-endpoint scraping
-    let altFromId: string | undefined;
-    let altToId: string | undefined;
-    let altDepartures: SelectOption[] | undefined;
-    if (hasPremiumCoach(options.schedule)) {
-      try {
-        const { basePath: altBasePath, terminals: altTerminals } =
-          await loadTerminalsAlt(session, options.schedule);
-        const altFrom = findOption(altTerminals, options.from);
-        if (altFrom) {
-          const altDests = await loadDestinations(
-            session,
-            altBasePath,
-            options.schedule,
-            altFrom.value,
-          );
-          const altTo = findOption(altDests, options.to);
-          if (altTo) {
-            altFromId = altFrom.value;
-            altToId = altTo.value;
-            const altDepName =
-              options.schedule === "inter_county"
-                ? "depature_time"
-                : "premium_depature_time";
-            altDepartures = extractNamedSelectOptions(home.html, altDepName);
-          }
-        }
-      } catch {
-        // Proceed with primary only
-      }
-    }
 
     const departuresToQuery =
       options.departure && !options.allTrains
         ? [{ value: options.departure, label: options.departure }]
-        : uniqueBy(
-            [{ value: "", label: "<blank>" }, ...departures],
-            (o) => o.value,
-          );
+        : route.departuresToQuery;
 
-    const allResults: TrainSearchResult[] = [];
-    const soldOutSlots: string[] = [];
-    const fromLower = fromOption.label.toLowerCase();
-    const toLower = toOption.label.toLowerCase();
-
-    // --- Primary endpoint ---
-    for (const option of departuresToQuery) {
-      const response = await submitSearch(session, home.csrfToken, {
-        schedule: options.schedule,
-        fromId: fromOption.value,
-        toId: toOption.value,
-        date: options.date,
-        departure: option.value,
-      });
-
-      const parsed: (PartialStandard | PartialPremium)[] = [
-        ...parseStandardResults(response.text),
-        ...parsePremiumResults(response.text),
-      ];
-
-      const matching = parsed.filter(
-        (r) =>
-          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
-      );
-
-      if (
-        matching.length === 0 &&
-        options.schedule !== "phase2" &&
-        isSoldOut(response.text)
-      ) {
-        soldOutSlots.push(option.value);
-      }
-
-      for (const result of matching) {
-        allResults.push({
-          ...result,
-          queriedDeparture: option.value || "<blank>",
-          queriedDepartureLabel: option.label || option.value || "<blank>",
-          statusCode: response.statusCode,
-          protocol: response.protocol,
-        } as TrainSearchResult);
-      }
-    }
-
-    // --- Alternate endpoint (dual-endpoint for express/inter_county) ---
-    if (altFromId && altToId && altDepartures) {
-      const altSubmit =
-        options.schedule === "inter_county"
-          ? submitStandardSearch
-          : submitPremiumSearch;
-      const altDepsToQuery =
-        options.departure && !options.allTrains
-          ? [{ value: options.departure, label: options.departure }]
-          : uniqueBy(
-              [{ value: "", label: "<blank>" }, ...altDepartures],
-              (o) => o.value,
-            );
-
-      for (const option of altDepsToQuery) {
-        try {
-          const response = await altSubmit(session, home.csrfToken, {
-            schedule: options.schedule,
-            fromId: altFromId,
-            toId: altToId,
-            date: options.date,
-            departure: option.value,
-          });
-
-          const parsed: (PartialStandard | PartialPremium)[] =
-            options.schedule === "inter_county"
-              ? parseStandardResults(response.text)
-              : parsePremiumResults(response.text);
-
-          const matching = parsed.filter(
-            (r) =>
-              r.from.toLowerCase() === fromLower &&
-              r.to.toLowerCase() === toLower,
-          );
-
-          for (const result of matching) {
-            allResults.push({
-              ...result,
-              queriedDeparture: option.value || "<blank>",
-              queriedDepartureLabel: option.label || option.value || "<blank>",
-              statusCode: response.statusCode,
-              protocol: response.protocol,
-            } as TrainSearchResult);
-          }
-        } catch {
-          // Non-fatal
-        }
-      }
-    }
-
-    const results = uniqueBy(
-      allResults,
-      (r) =>
-        `${r.resultType}|${r.trainId}|${r.trainNo}|${r.departure}|${r.arrival}|${r.from}|${r.to}`,
+    const legacy = await queryLegacyDay(
+      { session, csrfToken: home.csrfToken },
+      options.schedule,
+      route,
+      options.date,
+      departuresToQuery,
     );
 
-    // Detect sold-out: at least one slot returned sold-out with no matching results
-    const fullyBooked = soldOutSlots.length > 0;
+    const results: TrainSearchResult[] = uniqueBy(
+      legacy.results,
+      (r) =>
+        `${r.trainId}|${r.trainNo}|${r.departure}|${r.arrival}|${r.from}|${r.to}`,
+    );
+    results.push(...(await premiumPromise));
 
-    // Express only: create synthetic sold-out entries for specific departure
-    // slots so the DaySheet shows them alongside available trains.
-    // Inter-county and phase2 don't have trains at the shared 3PM/10PM slots,
-    // so they just use the fullyBooked flag for a generic message.
+    const fullyBooked = legacy.soldOutSlots.length > 0;
+
     if (fullyBooked && options.schedule === "express") {
       const foundDepartures = new Set(
-        results.map((r) => {
-          const hhmm = r.departure.match(/(\d{2}):(\d{2})/);
-          return hhmm ? hhmm[0] : r.departure;
-        }),
+        results.map((r) => extractTime(r.departure)),
       );
-      for (const slot of soldOutSlots) {
-        if (!slot) continue;
-        const depOpt = departuresToQuery.find((o) => o.value === slot);
-        const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
-        if (!dep || foundDepartures.has(dep)) continue;
-
+      for (const slot of legacy.soldOutSlots) {
+        const sold = soldOutDeparture(slot, departuresToQuery);
+        if (!sold || foundDepartures.has(sold.dep)) continue;
         results.push({
           resultType: "standard",
           title: "",
           trainId: "",
           trainNo: "",
-          from: fromOption.label,
-          to: toOption.label,
-          departure: dep,
+          from: route.fromLabel,
+          to: route.toLabel,
+          departure: sold.dep,
           arrival: "",
           fare: {
             economyAdult: "",
@@ -820,14 +576,20 @@ export async function scrapeSearch(
           bookingEndpoint: "",
           reviewEndpoint: "",
           queriedDeparture: slot,
-          queriedDepartureLabel: depOpt?.label || slot,
+          queriedDepartureLabel: sold.label,
           statusCode: 200,
           protocol: "",
-        } as StandardTrainResult);
+        });
       }
     }
 
-    return { terminals, destinations, departures, results, fullyBooked };
+    return {
+      terminals: route.terminals,
+      destinations: route.destinations,
+      departures: route.departures,
+      results,
+      fullyBooked,
+    };
   } finally {
     session.close();
   }
@@ -844,45 +606,21 @@ function extractTime(datetime: string): string {
   return match ? match[0] : datetime;
 }
 
-function toMonthDayTrain(result: TrainSearchResult): MonthDayTrain {
-  if (result.resultType === "standard") {
-    return {
-      trainNo: result.trainNo,
-      departure: extractTime(result.departure),
-      economy: parseInt(result.openSeats.economy, 10) || 0,
-      firstClass: parseInt(result.openSeats.firstClass, 10) || 0,
-      premium: 0,
-    };
-  }
-  const total = result.seatGroups.reduce((sum, g) => {
-    if (g.decodeError) return sum;
-    const n =
-      typeof g.availableSeats === "number"
-        ? g.availableSeats
-        : parseInt(String(g.availableSeats ?? "0"), 10) || 0;
-    return sum + n;
-  }, 0);
+function toMonthDayTrain(result: StandardTrainResult): MonthDayTrain {
   return {
     trainNo: result.trainNo,
     departure: extractTime(result.departure),
-    economy: 0,
-    firstClass: 0,
-    premium: total,
+    economy: parseInt(result.openSeats.economy, 10) || 0,
+    firstClass: parseInt(result.openSeats.firstClass, 10) || 0,
+    premium: 0,
   };
 }
 
-/**
- * Merge standard and premium MonthDayTrain entries by departure hour.
- * Same physical train has different trainNo on each endpoint (e.g. E2 vs E12),
- * so we match by HH:MM departure time.
- */
 function mergeTrains(trains: MonthDayTrain[]): MonthDayTrain[] {
   const byDep = new Map<string, MonthDayTrain>();
   for (const t of trains) {
     const existing = byDep.get(t.departure);
     if (existing) {
-      // Merge: pick the trainNo from standard (more recognizable) and
-      // combine seat counts.
       existing.economy = existing.economy || t.economy;
       existing.firstClass = existing.firstClass || t.firstClass;
       existing.premium = existing.premium || t.premium;
@@ -894,153 +632,44 @@ function mergeTrains(trains: MonthDayTrain[]): MonthDayTrain[] {
   return [...byDep.values()];
 }
 
-/** Whether a schedule type uses dual endpoints (standard + premium). */
-function hasPremiumCoach(schedule: Schedule): boolean {
-  return schedule === "express" || schedule === "inter_county";
-}
-
 // Scrape a single day using an already-established session and CSRF token.
 // Departure queries run sequentially within the session to stay friendly to
 // PHP's per-session file lock (concurrent requests sharing the same
 // PHPSESSID are serialised server-side anyway).
 async function scrapeDayWithSession(
-  session: Session,
-  csrfToken: string,
-  config: {
-    schedule: Schedule;
-    fromId: string;
-    toId: string;
-    fromLabel: string;
-    toLabel: string;
-    date: string;
-    departuresToQuery: SelectOption[];
-    // Alternate endpoint IDs (for dual standard+premium scraping)
-    altFromId?: string;
-    altToId?: string;
-    altDeparturesToQuery?: SelectOption[];
-  },
+  ctx: LegacySession,
+  schedule: Schedule,
+  route: ResolvedRoute,
+  from: string,
+  to: string,
+  date: string,
 ): Promise<MonthDay> {
-  const dayResults: TrainSearchResult[] = [];
-  const soldOutSlots: string[] = [];
-  const fromLower = config.fromLabel.toLowerCase();
-  const toLower = config.toLabel.toLowerCase();
-
-  // --- Primary endpoint queries ---
-  for (const option of config.departuresToQuery) {
-    try {
-      const response = await submitSearch(session, csrfToken, {
-        schedule: config.schedule,
-        fromId: config.fromId,
-        toId: config.toId,
-        date: config.date,
-        departure: option.value,
-      });
-
-      const parsed: (PartialStandard | PartialPremium)[] = [
-        ...parseStandardResults(response.text),
-        ...parsePremiumResults(response.text),
-      ];
-
-      const matching = parsed.filter(
-        (r) =>
-          r.from.toLowerCase() === fromLower && r.to.toLowerCase() === toLower,
-      );
-
-      if (
-        matching.length === 0 &&
-        option.value &&
-        config.schedule !== "phase2" &&
-        isSoldOut(response.text)
-      ) {
-        soldOutSlots.push(option.value);
-      }
-
-      for (const result of matching) {
-        dayResults.push({
-          ...result,
-          queriedDeparture: option.value || "<blank>",
-          queriedDepartureLabel: option.label || option.value || "<blank>",
-          statusCode: response.statusCode,
-          protocol: response.protocol,
-        } as TrainSearchResult);
-      }
-    } catch {
-      // A single departure-slot failure should not kill the whole day.
-    }
+  const [legacy, premium] = await Promise.all([
+    queryLegacyDay(ctx, schedule, route, date, route.departuresToQuery),
+    premiumDayTrains(schedule, from, to, date).catch(() => []),
+  ]);
+  if (legacy.failedSlots > 0) {
+    throw new Error(`${date}: ${legacy.failedSlots} departure slot(s) failed`);
   }
 
-  // --- Alternate endpoint queries (dual-endpoint for express/inter_county) ---
-  if (config.altFromId && config.altToId && config.altDeparturesToQuery) {
-    // Determine which function to call based on schedule:
-    // inter_county primary=premium, alt=standard
-    // express primary=standard, alt=premium
-    const altSubmit =
-      config.schedule === "inter_county"
-        ? submitStandardSearch
-        : submitPremiumSearch;
-    const altDepartures = config.altDeparturesToQuery;
+  const trains = mergeTrains([
+    ...uniqueBy(
+      legacy.results,
+      (r) => `${r.trainId}|${r.trainNo}|${r.departure}`,
+    ).map(toMonthDayTrain),
+    ...premium,
+  ]);
 
-    for (const option of altDepartures) {
-      try {
-        const response = await altSubmit(session, csrfToken, {
-          schedule: config.schedule,
-          fromId: config.altFromId,
-          toId: config.altToId,
-          date: config.date,
-          departure: option.value,
-        });
+  const fullyBooked = legacy.soldOutSlots.length > 0;
 
-        // Parse only the relevant result type from this endpoint
-        const parsed: (PartialStandard | PartialPremium)[] =
-          config.schedule === "inter_county"
-            ? parseStandardResults(response.text)
-            : parsePremiumResults(response.text);
-
-        const matching = parsed.filter(
-          (r) =>
-            r.from.toLowerCase() === fromLower &&
-            r.to.toLowerCase() === toLower,
-        );
-
-        for (const result of matching) {
-          dayResults.push({
-            ...result,
-            queriedDeparture: option.value || "<blank>",
-            queriedDepartureLabel: option.label || option.value || "<blank>",
-            statusCode: response.statusCode,
-            protocol: response.protocol,
-          } as TrainSearchResult);
-        }
-      } catch {
-        // Non-fatal
-      }
-    }
-  }
-
-  const rawTrains = uniqueBy(
-    dayResults,
-    (r) => `${r.resultType}|${r.trainId}|${r.trainNo}|${r.departure}`,
-  ).map(toMonthDayTrain);
-
-  // Merge standard + premium entries for the same departure time
-  const trains = hasPremiumCoach(config.schedule)
-    ? mergeTrains(rawTrains)
-    : rawTrains;
-
-  const fullyBooked = soldOutSlots.length > 0;
-
-  // Express only: synthetic sold-out entries for specific departure slots.
-  // The 3PM/10PM slots map to real express trains. Inter-county and phase2
-  // don't have trains at those times, so they just use the fullyBooked flag.
-  if (fullyBooked && config.schedule === "express") {
+  if (fullyBooked && schedule === "express") {
     const foundDepartures = new Set(trains.map((t) => t.departure));
-    for (const slot of soldOutSlots) {
-      const depOpt = config.departuresToQuery.find((o) => o.value === slot);
-      const dep = depOpt ? departureTimeFromSlot(depOpt.label) : "";
-      if (dep && !foundDepartures.has(dep)) {
+    for (const slot of legacy.soldOutSlots) {
+      const sold = soldOutDeparture(slot, route.departuresToQuery);
+      if (sold && !foundDepartures.has(sold.dep)) {
         trains.push({
           trainNo: "",
-          departure: dep,
+          departure: sold.dep,
           economy: 0,
           firstClass: 0,
           premium: 0,
@@ -1049,7 +678,7 @@ async function scrapeDayWithSession(
     }
   }
 
-  return { date: config.date, trains, fullyBooked };
+  return { date, trains, fullyBooked };
 }
 
 // How many parallel PHP sessions to open for a month scrape.
@@ -1071,96 +700,18 @@ export async function scrapeMonthStreaming(
   onDay: (day: MonthDay) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  let fromId: string;
-  let toId: string;
-  let fromLabel: string;
-  let toLabel: string;
-  let departuresToQuery: SelectOption[];
-  // Alt endpoint IDs for dual-endpoint scraping (express/inter_county)
-  let altFromId: string | undefined;
-  let altToId: string | undefined;
-  let altDeparturesToQuery: SelectOption[] | undefined;
-
+  let route: ResolvedRoute;
   {
     const setup = createSession();
     try {
       const home = await loadHome(setup);
-      const { basePath, terminals } = await loadTerminals(setup, schedule);
-
-      const departures = extractNamedSelectOptions(
-        home.html,
-        schedule === "inter_county" ? "premium_depature_time" : "depature_time",
-      );
-
-      const fromOption = findOption(terminals, from);
-      if (!fromOption) {
-        throw new Error(`Departure terminal '${from}' was not found.`);
-      }
-
-      const destinations = await loadDestinations(
-        setup,
-        basePath,
-        schedule,
-        fromOption.value,
-      );
-
-      const toOption = findOption(destinations, to);
-      if (!toOption) {
-        throw new Error(
-          `Destination '${to}' was not found for ${fromOption.label}.`,
-        );
-      }
-
-      fromId = fromOption.value;
-      toId = toOption.value;
-      fromLabel = fromOption.label;
-      toLabel = toOption.label;
-      departuresToQuery = uniqueBy(
-        [{ value: "", label: "<blank>" }, ...departures],
-        (o) => o.value,
-      );
-
-      // Resolve alternate endpoint IDs for dual-endpoint scraping
-      if (hasPremiumCoach(schedule)) {
-        try {
-          const { basePath: altBasePath, terminals: altTerminals } =
-            await loadTerminalsAlt(setup, schedule);
-
-          const altFromOption = findOption(altTerminals, from);
-          if (altFromOption) {
-            const altDestinations = await loadDestinations(
-              setup,
-              altBasePath,
-              schedule,
-              altFromOption.value,
-            );
-            const altToOption = findOption(altDestinations, to);
-            if (altToOption) {
-              altFromId = altFromOption.value;
-              altToId = altToOption.value;
-              const altDepName =
-                schedule === "inter_county"
-                  ? "depature_time"
-                  : "premium_depature_time";
-              const altDeps = extractNamedSelectOptions(home.html, altDepName);
-              altDeparturesToQuery = uniqueBy(
-                [{ value: "", label: "<blank>" }, ...altDeps],
-                (o) => o.value,
-              );
-            }
-          }
-        } catch {
-          // If alt resolution fails, proceed with primary only
-        }
-      }
+      route = await resolveRoute(setup, home.html, schedule, from, to);
     } finally {
       setup.close();
     }
   }
 
-  // Phase 2: distribute dates across MONTH_CONCURRENCY worker sessions.
-  // Each worker opens its OWN homepage → own PHPSESSID → no session lock
-  // contention. Within each worker, days are processed sequentially.
+  // Each worker opens its own homepage -> own PHPSESSID -> no session lock contention.
   const daysInMonth = new Date(year, month, 0).getDate();
   const now = new Date();
   const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -1168,7 +719,9 @@ export async function scrapeMonthStreaming(
   const dates = Array.from({ length: daysInMonth }, (_, i) => {
     const d = i + 1;
     return `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-  }).filter((date) => date >= todayStr && date <= horizonStr);
+  }).filter(
+    (date) => date >= todayStr && date <= horizonStr && runsOn(schedule, date),
+  );
 
   const chunkSize = Math.ceil(dates.length / MONTH_CONCURRENCY);
   const chunks: string[][] = [];
@@ -1180,28 +733,27 @@ export async function scrapeMonthStreaming(
     chunks.map(async (chunk) => {
       const worker = createSession();
       try {
-        const { csrfToken } = await loadHome(worker);
+        const ctx: LegacySession = {
+          session: worker,
+          csrfToken: (await loadHome(worker)).csrfToken,
+        };
 
         for (const date of chunk) {
           if (signal?.aborted) break;
 
           try {
-            const day = await scrapeDayWithSession(worker, csrfToken, {
-              schedule,
-              fromId,
-              toId,
-              fromLabel,
-              toLabel,
-              date,
-              departuresToQuery,
-              altFromId,
-              altToId,
-              altDeparturesToQuery,
-            });
-            onDay(day);
+            onDay(
+              await scrapeDayWithSession(
+                ctx,
+                schedule,
+                route,
+                from,
+                to,
+                date,
+              ),
+            );
           } catch {
-            // Emit an empty day rather than aborting the whole stream.
-            onDay({ date, trains: [] });
+            // Skipped days keep their previously cached value.
           }
 
           worker.refresh();
@@ -1215,7 +767,6 @@ export async function scrapeMonthStreaming(
 
 /**
  * Blocking version — collects all days and returns them sorted.
- * Used by the cached `/api/trains/month` route handler.
  */
 export async function scrapeMonth(
   schedule: Schedule,

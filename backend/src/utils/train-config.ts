@@ -168,10 +168,16 @@ export const TRAIN_TYPE_CONFIG: Record<TrainType, TrainTypeConfig> = {
     ]),
     departureOptions: [],
     bookingHorizonDays: 30,
+    operatingDays: [5, 6, 0],
   },
 };
 
 export const TRAIN_TYPES = Object.values(TRAIN_TYPE_CONFIG);
+
+export function runsOn(type: TrainType, date: string): boolean {
+  const days = TRAIN_TYPE_CONFIG[type].operatingDays;
+  return !days || days.includes(new Date(`${date}T12:00:00`).getDay());
+}
 
 export function lastBookableDate(type: TrainType): string {
   const horizon = TRAIN_TYPE_CONFIG[type].bookingHorizonDays;
